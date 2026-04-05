@@ -1,0 +1,5 @@
+com\university\grades\service\StudentService.class
+com\university\grades\GradeManagementApplication.class
+com\university\grades\repository\StudentRepository.class
+com\university\grades\controller\StudentController.class
+com\university\grades\model\Student.class
