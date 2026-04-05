@@ -12,7 +12,7 @@ on:
 # Used by Mechanism 9: Environment Variable Verification
 # ─────────────────────────────────────────────
 env:
-  JAVA_VERSION: '17'
+  JAVA_VERSION: '21'
   MAVEN_OPTS: '-Xmx1024m'
   APP_NAME: 'grade-management'
   BUILD_TIMEOUT_MINUTES: '10'
