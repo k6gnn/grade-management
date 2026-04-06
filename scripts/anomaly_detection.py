@@ -186,14 +186,22 @@ def classify_from_log(log_text):
 
 # ─── Status-based classification ──────────────────────────────────────────────
 
-def classify_from_status(build, test, package_, log_text=None):
+def classify_from_status(config, build, test, package_, log_text=None):
     """
-    Classifies failure type based on pipeline stages.
+    Classifies failure type based on which pipeline stages failed.
+    Configuration gate failures are handled explicitly first.
     If log text is available, prefer configuration signals before
-    falling back to generic test failure.
+    falling back to generic stage-based mapping.
     """
 
-    # 🔥 NEW: detect configuration from log hints even in fallback
+    # Config gate failed before build started
+    if config == "failure":
+        return next(
+            (r for r in CLASSIFICATION_RULES if r["failure_type"] == "configuration"),
+            None
+        )
+
+    # Optional log-aware fallback for configuration-like test failures
     if log_text:
         config_signals = [
             "ApplicationContext",
@@ -213,7 +221,6 @@ def classify_from_status(build, test, package_, log_text=None):
                     None
                 )
 
-    # Original logic
     key = (build, test, package_)
     failure_type = STATUS_RULES.get(key)
     if failure_type:
@@ -228,7 +235,12 @@ def classify_from_status(build, test, package_, log_text=None):
 
 def parse_status_file(path):
     """Reads the pipeline_status.txt written by the workflow."""
-    status = {"build_status": "unknown", "test_status": "unknown", "package_status": "unknown"}
+    status = {
+    "config_status": "unknown",
+    "build_status": "unknown",
+    "test_status": "unknown",
+    "package_status": "unknown",
+}
     if not os.path.exists(path):
         return status
     with open(path) as f:
@@ -255,17 +267,19 @@ def main():
 
     # Parse pipeline status
     status = parse_status_file(status_file)
+    config_s  = status.get("config_status",  "unknown")
     build_s   = status.get("build_status",   "unknown")
     test_s    = status.get("test_status",    "unknown")
     package_s = status.get("package_status", "unknown")
 
     print(f"\nPipeline stage results:")
+    print(f"  Config:  {config_s}")
     print(f"  Build:   {build_s}")
     print(f"  Test:    {test_s}")
     print(f"  Package: {package_s}")
 
     # Determine if pipeline actually failed
-    all_passed = all(s == "success" for s in [build_s, test_s, package_s])
+    all_passed = all(s == "success" for s in [config_s, build_s, test_s, package_s])
 
     if all_passed:
         print("\nAll stages passed — no anomaly detected.")
@@ -297,7 +311,8 @@ def main():
 
     if log_file and os.path.exists(log_file):
         print(f"  Reading log file: {log_file}")
-        log_text = open(log_file).read()
+        with open(log_file, "r", encoding="utf-8", errors="ignore") as f:
+            log_text = f.read()
         matched_rule, matched_keyword = classify_from_log(log_text)
         if matched_rule:
             classification_method = "log_analysis"
@@ -305,7 +320,7 @@ def main():
 
     # Step 2: Fall back to status-based classification.
     if not matched_rule:
-            matched_rule = classify_from_status(build_s, test_s, package_s)
+            matched_rule = classify_from_status(config_s, build_s, test_s, package_s, log_text)
             if matched_rule:
                 classification_method = "stage_status_analysis"
 
