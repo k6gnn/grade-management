@@ -41,21 +41,6 @@ class StudentServiceTest {
     void getAllStudents_shouldReturnAllStudents() {
         when(studentRepository.findAll()).thenReturn(Arrays.asList(student1, student2));
 
-        // ── INJECTED: Flaky sleep — always exceeds Surefire timeout ──────────
-        // BASE_SLEEP_MS (1500) + random jitter (0-500) guarantees the sleep
-        // breaches a 1000 ms per-test timeout on every run.
-        // Maven Surefire will terminate the test and emit:
-        //   TestTimedOutException: test timed out after 1000 milliseconds
-        // which is the keyword anomaly_detection.py uses to classify this
-        // failure as FLAKY_TEST rather than TEST_FAILURE.
-        try {
-            final long BASE_SLEEP_MS = 1500L;
-            final long JITTER_MS     = (long)(Math.random() * 500);
-            Thread.sleep(BASE_SLEEP_MS + JITTER_MS);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-        }
-        // ── END INJECTED ──────────────────────────────────────────────────────
         List<Student> result = studentService.getAllStudents();
 
         assertEquals(2, result.size());

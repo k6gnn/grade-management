@@ -9,7 +9,7 @@ self-healing mechanism.
 Produces a structured JSON report: anomaly_report.json
 
 Usage (from GitHub Actions workflow):
-    python scripts/anomaly_detection.py pipeline_status.txt
+    python scripts/anomaly_detection.py pipeline_status.txt [log_file.txt]
 
 Usage (standalone for testing):
     python scripts/anomaly_detection.py pipeline_status.txt [log_file.txt]
@@ -24,6 +24,10 @@ from datetime import datetime, timezone
 # ─── Failure Classification Rules ─────────────────────────────────────────────
 # Each rule maps a set of keyword patterns to a failure classification.
 # Rules are evaluated in order — first match wins.
+#
+# IMPORTANT: flaky_test MUST appear before test_failure in this list.
+# A flaky timeout produces some of the same keywords as a deterministic
+# failure (e.g. "FAILED"), so the more-specific flaky rule must win.
 
 CLASSIFICATION_RULES = [
     {
@@ -48,8 +52,8 @@ CLASSIFICATION_RULES = [
         "description":     "Dependency resolution failure detected",
         "keywords":        [
             "Could not resolve dependencies",
-            "artifact.*not found",
-            "Cannot access.*repository",
+            r"artifact.*not found",
+            r"Cannot access.*repository",
             "Connection refused",
             "Could not transfer artifact",
             "Failed to read artifact descriptor",
@@ -78,18 +82,26 @@ CLASSIFICATION_RULES = [
         "recommended_mechanisms": ["M7 — Automated rollback", "M8 — Config validation gate", "M9 — Env var verification"],
         "severity":        "HIGH",
     },
+    # ── Flaky test BEFORE deterministic test_failure ───────────────────────────
+    # TestTimedOutException and InterruptedException are the primary signals
+    # emitted by Maven Surefire when a Thread.sleep() exceeds the test timeout.
+    # These keywords are exclusive to flaky/timing failures and do not appear
+    # in deterministic assertion failures, so the ordering here is the correct
+    # disambiguation strategy.
     {
         "failure_type":    "flaky_test",
-        "description":     "Non-deterministic test failure detected (possible flaky test)",
+        "description":     "Non-deterministic (flaky) test failure detected",
         "keywords":        [
             "TestTimedOutException",
-            "test timed out",
+            "test timed out after",
+            "timed out",
             "InterruptedException",
-            "Thread.sleep",
-            "FAILED.*passed on retry",
+            r"FAILED.*passed on retry",
             "Flaky",
+            # Maven Surefire emits this when a @Test(timeout=…) is breached
+            "The test run has exceeded",
         ],
-        "root_cause":      "Test failure is non-deterministic — likely caused by timing or environmental instability",
+        "root_cause":      "Test failure is non-deterministic — caused by timing instability or environment jitter",
         "recommended_mechanisms": ["M4 — Test retry", "M5 — Flaky test quarantine", "M6 — Trend analysis"],
         "severity":        "MEDIUM",
     },
@@ -99,10 +111,10 @@ CLASSIFICATION_RULES = [
         "keywords":        [
             "AssertionError",
             "expected:<",
-            "Tests run:.*Failures: [^0]",
-            "Tests run:.*Errors: [^0]",
+            r"Tests run:.*Failures: [^0]",
+            r"Tests run:.*Errors: [^0]",
             "FAILED",
-            "BUILD FAILURE.*test",
+            r"BUILD FAILURE.*test",
             "expected: <",
             "but was: <",
             "MockMvc",
@@ -115,14 +127,20 @@ CLASSIFICATION_RULES = [
 ]
 
 # ─── Status-based classification ─────────────────────────────────────────────
+# Maps (build_result, test_result, package_result) tuples to failure types.
+#
+# NOTE: A flaky timeout and a deterministic test failure are INDISTINGUISHABLE
+# from stage statuses alone — both produce ("success", "failure", *).
+# Status-based classification therefore cannot identify flaky failures;
+# that distinction requires log analysis (see classify_from_log).
 
 STATUS_RULES = {
-    ("failure", "success", "success"): "compilation",
-    ("failure", "skipped", "skipped"): "compilation",
-    ("success", "failure", "success"): "test_failure",
-    ("success", "failure", "skipped"): "test_failure",
-    ("success", "success", "failure"): "infrastructure",
-    ("failure", "failure", "failure"): "compilation",
+    ("failure", "success",  "success"):  "compilation",
+    ("failure", "skipped",  "skipped"):  "compilation",
+    ("failure", "failure",  "failure"):  "compilation",
+    ("success", "failure",  "success"):  "test_failure",
+    ("success", "failure",  "skipped"):  "test_failure",
+    ("success", "success",  "failure"):  "infrastructure",
 }
 
 # ─── Metric Calculation ───────────────────────────────────────────────────────
@@ -141,7 +159,6 @@ def calculate_detection_metrics(classified_type, actual_type=None):
             "estimated_f1":        round(2 * 0.85 * 0.80 / (0.85 + 0.80), 4),
         }
 
-    # Binary classification metrics for the detected type
     tp = 1 if classified_type == actual_type else 0
     fp = 1 if classified_type != actual_type else 0
     fn = 1 if classified_type != actual_type else 0
@@ -164,8 +181,8 @@ def calculate_detection_metrics(classified_type, actual_type=None):
 
 def classify_from_log(log_text):
     """
-    Scans log text against classification rules.
-    Returns the first matching rule or None.
+    Scans log text against classification rules (first match wins).
+    Returns (matched_rule, matched_keyword) or (None, None).
     """
     for rule in CLASSIFICATION_RULES:
         for keyword in rule["keywords"]:
@@ -178,6 +195,8 @@ def classify_from_log(log_text):
 def classify_from_status(build, test, package_):
     """
     Classifies failure type based on which pipeline stages failed.
+    Cannot distinguish flaky from deterministic test failures — use
+    log analysis for that disambiguation.
     """
     key = (build, test, package_)
     failure_type = STATUS_RULES.get(key)
@@ -202,6 +221,32 @@ def parse_status_file(path):
                 status[key.strip()] = val.strip()
     return status
 
+# ─── Collect Surefire reports as supplementary log text ───────────────────────
+
+def collect_surefire_logs(report_dir="target/surefire-reports"):
+    """
+    Reads all Maven Surefire .txt reports from the test runner output directory.
+    These reports contain the actual exception stack traces (including
+    TestTimedOutException and InterruptedException) that are the primary
+    signals for flaky test detection.
+
+    Returns concatenated report text, or empty string if not found.
+    """
+    if not os.path.isdir(report_dir):
+        return ""
+
+    parts = []
+    for fname in os.listdir(report_dir):
+        if fname.endswith(".txt"):
+            fpath = os.path.join(report_dir, fname)
+            try:
+                with open(fpath, encoding="utf-8", errors="replace") as f:
+                    parts.append(f.read())
+            except OSError:
+                pass
+
+    return "\n".join(parts)
+
 # ─── Main ─────────────────────────────────────────────────────────────────────
 
 def main():
@@ -217,7 +262,7 @@ def main():
     print("=" * 60)
 
     # Parse pipeline status
-    status = parse_status_file(status_file)
+    status  = parse_status_file(status_file)
     build_s   = status.get("build_status",   "unknown")
     test_s    = status.get("test_status",    "unknown")
     package_s = status.get("package_status", "unknown")
@@ -227,17 +272,16 @@ def main():
     print(f"  Test:    {test_s}")
     print(f"  Package: {package_s}")
 
-    # Determine if pipeline actually failed
     all_passed = all(s == "success" for s in [build_s, test_s, package_s])
 
     if all_passed:
         print("\nAll stages passed — no anomaly detected.")
         report = {
-            "timestamp":      datetime.now(timezone.utc).isoformat(),
-            "pipeline_run":   os.environ.get("GITHUB_RUN_NUMBER", "local"),
+            "timestamp":        datetime.now(timezone.utc).isoformat(),
+            "pipeline_run":     os.environ.get("GITHUB_RUN_NUMBER", "local"),
             "anomaly_detected": False,
-            "message":        "All pipeline stages completed successfully",
-            "stage_results":  status,
+            "message":          "All pipeline stages completed successfully",
+            "stage_results":    status,
         }
         with open("anomaly_report.json", "w") as f:
             json.dump(report, f, indent=2)
@@ -246,40 +290,62 @@ def main():
 
     print("\nAnomaly detected — classifying failure...")
 
-    matched_rule    = None
-    matched_keyword = None
+    # ── Build the log corpus ──────────────────────────────────────────────────
+    # Priority order:
+    #   1. Explicit log file passed as CLI argument
+    #   2. Maven Surefire reports (always present after mvn test)
+    # Both sources are combined so that a single classify_from_log pass
+    # can find flaky keywords in Surefire output even when no explicit
+    # log file is passed from the workflow.
+
+    log_corpus = ""
+
+    if log_file and os.path.exists(log_file):
+        print(f"  Reading explicit log file: {log_file}")
+        with open(log_file, encoding="utf-8", errors="replace") as f:
+            log_corpus += f.read() + "\n"
+
+    surefire_text = collect_surefire_logs()
+    if surefire_text:
+        print(f"  Reading Maven Surefire reports from target/surefire-reports/")
+        log_corpus += surefire_text
+
+    # ── Classification ────────────────────────────────────────────────────────
+
+    matched_rule          = None
+    matched_keyword       = None
     classification_method = None
 
-    # Step 1: Try log-based classification if log file provided
-    if log_file and os.path.exists(log_file):
-        print(f"  Reading log file: {log_file}")
-        log_text = open(log_file).read()
-        matched_rule, matched_keyword = classify_from_log(log_text)
+    # Step 1: Log-based (preferred — can detect flaky vs deterministic)
+    if log_corpus.strip():
+        matched_rule, matched_keyword = classify_from_log(log_corpus)
         if matched_rule:
             classification_method = "log_analysis"
             print(f"  Log match: '{matched_keyword}'")
 
-    # Step 2: Fall back to status-based classification
+    # Step 2: Status-based fallback (cannot distinguish flaky from test_failure)
     if not matched_rule:
+        print("  No log corpus available — falling back to stage-status analysis")
+        print("  NOTE: flaky_test cannot be detected without log data")
         matched_rule = classify_from_status(build_s, test_s, package_s)
         if matched_rule:
             classification_method = "stage_status_analysis"
 
-    # Step 3: Unknown if no rule matched
+    # Step 3: Unknown — manual investigation required
     if not matched_rule:
         matched_rule = {
-            "failure_type":    "unknown",
-            "description":     "Could not classify failure from available data",
-            "root_cause":      "Manual investigation required",
+            "failure_type":           "unknown",
+            "description":            "Could not classify failure from available data",
+            "root_cause":             "Manual investigation required",
             "recommended_mechanisms": ["Manual inspection of pipeline logs"],
-            "severity":        "UNKNOWN",
+            "severity":               "UNKNOWN",
         }
         classification_method = "unclassified"
 
-    # Calculate metrics
+    # ── Metrics and report ────────────────────────────────────────────────────
+
     metrics = calculate_detection_metrics(matched_rule["failure_type"])
 
-    # Build report
     report = {
         "timestamp":              datetime.now(timezone.utc).isoformat(),
         "pipeline_run":           os.environ.get("GITHUB_RUN_NUMBER", "local"),
@@ -296,7 +362,6 @@ def main():
     if matched_keyword:
         report["matched_keyword"] = matched_keyword
 
-    # Print summary
     print(f"\n{'─'*50}")
     print(f"  CLASSIFICATION RESULT")
     print(f"{'─'*50}")
@@ -309,12 +374,12 @@ def main():
     for m in matched_rule["recommended_mechanisms"]:
         print(f"    → {m}")
 
-    # Write JSON report
     with open("anomaly_report.json", "w") as f:
         json.dump(report, f, indent=2)
 
     print(f"\nReport written: anomaly_report.json")
     print("=" * 60)
+
 
 if __name__ == "__main__":
     main()

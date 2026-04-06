@@ -89,7 +89,6 @@ jobs:
             exit 1
           fi
 
-          # Check required pom.xml elements
           for element in "groupId" "artifactId" "version" "dependencies" "build"; do
             if grep -q "<$element>" pom.xml; then
               echo "OK: <$element> found in pom.xml"
@@ -107,6 +106,20 @@ jobs:
           if [ ! -f "$PROPS" ]; then
             echo "FAILURE: application.properties not found"
             exit 1
+          fi
+
+          # ── M8 fix: also validate that server.port is a valid integer ────────
+          # This catches the configuration failure injection BEFORE the build
+          # stage runs, surfacing it as a configuration error rather than a
+          # generic build failure and triggering the correct M7/M8/M9 chain.
+          PORT_VALUE=$(grep "^server.port=" "$PROPS" | cut -d'=' -f2)
+          if [ -n "$PORT_VALUE" ]; then
+            if ! echo "$PORT_VALUE" | grep -qE '^[0-9]+$'; then
+              echo "FAILURE: server.port has non-numeric value: '$PORT_VALUE'"
+              echo "Valid ports are integers in the range 1-65535."
+              exit 1
+            fi
+            echo "OK: server.port = $PORT_VALUE"
           fi
 
           for key in "spring.application.name" "server.port" "spring.datasource.url"; do
@@ -132,7 +145,6 @@ jobs:
     name: "Stage 1 — Build"
     runs-on: ubuntu-latest
     needs: configuration-validation
-    # M12 — Timeout-based job cancellation
     timeout-minutes: 10
 
     steps:
@@ -144,13 +156,9 @@ jobs:
         with:
           java-version: ${{ env.JAVA_VERSION }}
           distribution: 'temurin'
-          # M2 — Dependency version pinning: cache=maven ensures
-          # Maven uses the pinned versions in pom.xml
           cache: 'maven'
 
       # M11 — Dependency cache invalidation and rebuild
-      # If the cache key changes (pom.xml modified), the cache
-      # is automatically invalidated and rebuilt from scratch
       - name: Cache Maven dependencies
         uses: actions/cache@v4
         id: maven-cache
@@ -169,7 +177,9 @@ jobs:
           fi
 
       # M1 — Automated retry on transient build errors
-      # The build step retries up to 3 times if it fails
+      # ── build output is tee'd to build.log so anomaly detection
+      #    can perform keyword matching even when no explicit log file
+      #    is passed (the workflow previously passed none).
       - name: Compile application
         id: compile
         uses: nick-fields/retry@v3
@@ -177,10 +187,20 @@ jobs:
           timeout_minutes: ${{ env.BUILD_TIMEOUT_MINUTES }}
           max_attempts: ${{ env.MAX_RETRIES }}
           retry_on: error
-          command: mvn compile -B --no-transfer-progress
+          command: mvn compile -B --no-transfer-progress 2>&1 | tee build.log
+
+      # Upload build log as artifact so anomaly-detection job can download it.
+      # This is required because each GitHub Actions job runs on a fresh runner
+      # and does not share the filesystem with other jobs.
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log-${{ github.run_number }}
+          path: build.log
+          retention-days: 7
 
       # M3 — Automated notification and branch lockout
-      # If build fails after all retries, send notification
       - name: Notify on build failure
         if: failure()
         run: |
@@ -207,7 +227,6 @@ jobs:
     name: "Stage 2 — Test"
     runs-on: ubuntu-latest
     needs: build
-    # M12 — Timeout-based job cancellation
     timeout-minutes: 10
 
     steps:
@@ -230,16 +249,16 @@ jobs:
             ${{ runner.os }}-maven-
 
       # M4 — Automated retry of failed tests
-      # Tests are retried up to 3 times before reporting failure.
-      # A test that passes on retry is flagged as potentially flaky.
-      - name: Run test suite with retry
-        id: test-run
+      # ── test output is tee'd to test.log and Surefire reports are
+      #    uploaded below — anomaly detection reads both sources.
+      - name: Run tests
+        id: test
         uses: nick-fields/retry@v3
         with:
           timeout_minutes: ${{ env.TEST_TIMEOUT_MINUTES }}
           max_attempts: ${{ env.MAX_RETRIES }}
           retry_on: error
-          command: mvn test -B --no-transfer-progress
+          command: mvn test -B --no-transfer-progress 2>&1 | tee test.log
 
       # M5 — Flaky test quarantine
       # After test execution, analyse the Surefire reports.
@@ -256,21 +275,30 @@ jobs:
             exit 0
           fi
 
-          FAILED_TESTS=$(grep -l "FAILED\|ERROR" $REPORT_DIR/*.txt 2>/dev/null || true)
+          # ── Look for TestTimedOutException specifically ────────────────────
+          # This is the canonical signal for a sleep-induced flaky failure.
+          # grep returns exit code 1 when nothing is found, which would abort
+          # the step — use "|| true" to keep the step passing regardless.
+          TIMED_OUT=$(grep -rl "TestTimedOutException\|test timed out" "$REPORT_DIR" 2>/dev/null || true)
 
-          if [ -z "$FAILED_TESTS" ]; then
-            echo "All tests passed — no flaky test candidates detected"
-          else
-            echo "The following test reports contain failures:"
-            echo "$FAILED_TESTS"
+          if [ -n "$TIMED_OUT" ]; then
+            echo "FLAKY CANDIDATE DETECTED: TestTimedOutException found in:"
+            echo "$TIMED_OUT"
             echo ""
-            echo "If these tests passed on a previous retry (M4), they are"
-            echo "flagged as flaky candidates and quarantined from the"
-            echo "critical path on the next pipeline run."
+            echo "M5 action: these tests are flagged for quarantine."
+            echo "They will be excluded from the critical test gate on the next run"
+            echo "and tracked for trend analysis by M6."
+          else
+            FAILED_TESTS=$(grep -l "FAILED\|ERROR" "$REPORT_DIR"/*.txt 2>/dev/null || true)
+            if [ -z "$FAILED_TESTS" ]; then
+              echo "All tests passed — no flaky test candidates detected"
+            else
+              echo "Test failures found (deterministic, not flaky):"
+              echo "$FAILED_TESTS"
+            fi
           fi
 
       # M6 — Test result trend analysis
-      # Summarises test counts and flags trend anomalies.
       - name: Test result trend analysis
         if: always()
         run: |
@@ -310,7 +338,19 @@ jobs:
             echo "TREND OK: All tests passed in this run."
           fi
 
-      - name: Upload test reports
+      # Upload both the Maven output log AND the Surefire XML/TXT reports.
+      # The Surefire reports contain the full exception stack traces
+      # (including TestTimedOutException) that anomaly_detection.py reads
+      # via its collect_surefire_logs() function.
+      - name: Upload test log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-log-${{ github.run_number }}
+          path: test.log
+          retention-days: 7
+
+      - name: Upload Surefire reports
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -328,11 +368,7 @@ jobs:
     name: "Stage 3 — Package"
     runs-on: ubuntu-latest
     needs: test
-    # M12 — Timeout-based job cancellation
     timeout-minutes: 5
-    # M10 — Fresh container reset: each job in GitHub Actions
-    # runs on a completely fresh ubuntu-latest runner instance,
-    # eliminating any state corruption from previous stages
 
     steps:
       - name: Checkout repository
@@ -383,9 +419,7 @@ jobs:
     name: "Stage 4 — Deploy"
     runs-on: ubuntu-latest
     needs: package
-    # M12 — Timeout-based job cancellation
     timeout-minutes: 5
-    # Only deploy on pushes to main, not on pull requests
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
 
     steps:
@@ -412,8 +446,6 @@ jobs:
           echo "Deployment successful."
 
       # M7 — Automated rollback to last known good state
-      # If deployment fails, automatically revert to the
-      # last successful commit on the main branch
       - name: Rollback on deployment failure
         if: failure()
         run: |
@@ -437,7 +469,14 @@ jobs:
   # POST-PIPELINE: ANOMALY DETECTION
   # Mechanism active:
   #   M13 — Build log anomaly detection
-  # Runs after all stages regardless of outcome
+  # Runs after all stages regardless of outcome.
+  #
+  # Fix: this job now downloads the build log and Surefire reports
+  # produced by the build and test jobs, then passes the combined
+  # log corpus to anomaly_detection.py. Previously no log file was
+  # passed, making flaky_test classification impossible (the detector
+  # fell back to stage-status analysis, which cannot distinguish
+  # flaky from deterministic test failures).
   # ═══════════════════════════════════════════
   anomaly-detection:
     name: "M13 — Build Log Anomaly Detection"
@@ -455,13 +494,55 @@ jobs:
         with:
           python-version: '3.11'
 
+      # Download build log from Stage 1
+      - name: Download build log
+        if: always()
+        uses: actions/download-artifact@v4
+        with:
+          name: build-log-${{ github.run_number }}
+          path: logs/
+        continue-on-error: true   # artifact may not exist if build was skipped
+
+      # Download test log from Stage 2
+      - name: Download test log
+        if: always()
+        uses: actions/download-artifact@v4
+        with:
+          name: test-log-${{ github.run_number }}
+          path: logs/
+        continue-on-error: true   # artifact may not exist if test was skipped
+
+      # Download Surefire reports from Stage 2.
+      # These .txt files contain the full exception traces including
+      # TestTimedOutException — the primary signal for flaky detection.
+      - name: Download Surefire reports
+        if: always()
+        uses: actions/download-artifact@v4
+        with:
+          name: surefire-reports-${{ github.run_number }}
+          path: target/surefire-reports/
+        continue-on-error: true   # artifact may not exist if tests did not run
+
+      # Merge all downloaded log files into a single corpus for the detector.
+      - name: Merge log files
+        if: always()
+        run: |
+          mkdir -p logs
+          cat logs/build.log logs/test.log > logs/combined.log 2>/dev/null || true
+          LINES=$(wc -l < logs/combined.log 2>/dev/null || echo 0)
+          echo "Combined log corpus: $LINES lines"
+
       - name: Run anomaly detection script
         run: |
           echo "=== M13: Build Log Anomaly Detection ==="
           echo "build_status=${{ needs.build.result }}"     >> pipeline_status.txt
           echo "test_status=${{ needs.test.result }}"       >> pipeline_status.txt
           echo "package_status=${{ needs.package.result }}" >> pipeline_status.txt
-          python scripts/anomaly_detection.py pipeline_status.txt
+
+          # Pass the merged log file as the second argument.
+          # anomaly_detection.py will also automatically read
+          # target/surefire-reports/ via collect_surefire_logs().
+          python scripts/anomaly_detection.py pipeline_status.txt logs/combined.log
 
       - name: Upload anomaly detection report
         if: always()

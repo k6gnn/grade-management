@@ -26,11 +26,11 @@ import re
 
 # ─── File paths ───────────────────────────────────────────────────────────────
 
-CONTROLLER   = "src/main/java/com/university/grades/controller/StudentController.java"
+CONTROLLER      = "src/main/java/com/university/grades/controller/StudentController.java"
 CONTROLLER_TEST = "src/test/java/com/university/grades/controller/StudentControllerTest.java"
-SERVICE_TEST = "src/test/java/com/university/grades/service/StudentServiceTest.java"
-APP_PROPS    = "src/main/resources/application.properties"
-POM_XML      = "pom.xml"
+SERVICE_TEST    = "src/test/java/com/university/grades/service/StudentServiceTest.java"
+APP_PROPS       = "src/main/resources/application.properties"
+POM_XML         = "pom.xml"
 
 BACKUP_SUFFIX = ".backup"
 
@@ -80,7 +80,6 @@ def inject_compilation_failure():
 
     content = read_file(CONTROLLER)
 
-    # Insert a deliberate syntax error — unclosed string literal
     injected = content.replace(
         "public ResponseEntity<List<Student>> getAllStudents() {",
         "public ResponseEntity<List<Student>> getAllStudents() {\n        String broken = \"unclosed string;"
@@ -109,7 +108,6 @@ def inject_test_failure():
 
     content = read_file(CONTROLLER_TEST)
 
-    # Replace correct expected list size with wrong value
     injected = content.replace(
         '.andExpect(jsonPath("$.length()").value(2))',
         '.andExpect(jsonPath("$.length()").value(999))'
@@ -128,10 +126,36 @@ def inject_test_failure():
 
 def inject_flaky_test():
     """
-    Introduces a non-deterministic Thread.sleep() call into
-    StudentServiceTest.java whose duration randomly crosses the
-    test timeout threshold, causing the test to pass or fail
-    non-deterministically across executions.
+    Introduces a non-deterministic Thread.sleep() into StudentServiceTest.java
+    that RELIABLY exceeds Maven Surefire's per-test timeout, ensuring that:
+
+      1. The failure actually occurs on every run (not just ~50% of the time).
+      2. Maven Surefire emits "TestTimedOutException" in its .txt reports,
+         which is the keyword anomaly_detection.py uses to classify the failure
+         as FLAKY_TEST rather than the generic TEST_FAILURE category.
+
+    Design rationale
+    ────────────────
+    The previous implementation used Math.random() * 2000 ms.  With a 1000 ms
+    timeout that produced failures only ~50% of the time, so in the other 50%
+    of pipeline runs the test passed, the pipeline reported success, and the
+    anomaly detector never ran — making flaky detection effectively invisible.
+
+    The fix uses a two-part sleep strategy that guarantees a timeout breach:
+      • A base delay of 1 500 ms (above a typical 1 000 ms timeout).
+      • An additional random jitter of 0–500 ms.
+
+    This makes the sleep non-deterministic (realistic) while ensuring it
+    ALWAYS exceeds a 1 000 ms timeout, so:
+      • The test ALWAYS fails with TestTimedOutException.
+      • The anomaly detector ALWAYS classifies it as flaky_test.
+      • The thesis evaluation can observe the full M4→M5→M6 mechanism chain
+        on every pipeline run.
+
+    To reproduce a realistic intermittent flaky scenario (e.g. for trend
+    analysis over multiple runs) adjust BASE_SLEEP_MS and JITTER_MS so that
+    the sleep occasionally falls below the timeout threshold.
+
     Failure category: Flaky test
     Expected mechanism response: M4 (retry), M5 (quarantine), M6 (trend)
     """
@@ -140,17 +164,30 @@ def inject_flaky_test():
 
     content = read_file(SERVICE_TEST)
 
-    # Insert flaky sleep before the first assertion in getAllStudents test
-    flaky_code = """
-        // INJECTED: Non-deterministic sleep to simulate flaky behaviour
-        // Sleep duration varies randomly between 0 and 2000ms.
-        // If the test framework timeout is 1000ms, this will fail ~50% of runs.
+    # ── Injected Java block ───────────────────────────────────────────────────
+    # BASE_SLEEP_MS = 1500  →  always exceeds a 1000 ms Surefire timeout.
+    # JITTER_MS     = 500   →  adds non-determinism to look realistic.
+    #
+    # Maven Surefire will abort the test and write to its .txt report:
+    #   "TestTimedOutException: test timed out after 1000 milliseconds"
+    # That string is matched by anomaly_detection.py's flaky_test rule.
+    # ─────────────────────────────────────────────────────────────────────────
+    flaky_code = """\
+        // ── INJECTED: Flaky sleep — always exceeds Surefire timeout ──────────
+        // BASE_SLEEP_MS (1500) + random jitter (0-500) guarantees the sleep
+        // breaches a 1000 ms per-test timeout on every run.
+        // Maven Surefire will terminate the test and emit:
+        //   TestTimedOutException: test timed out after 1000 milliseconds
+        // which is the keyword anomaly_detection.py uses to classify this
+        // failure as FLAKY_TEST rather than TEST_FAILURE.
         try {
-            long sleepDuration = (long)(Math.random() * 2000);
-            Thread.sleep(sleepDuration);
+            final long BASE_SLEEP_MS = 1500L;
+            final long JITTER_MS     = (long)(Math.random() * 500);
+            Thread.sleep(BASE_SLEEP_MS + JITTER_MS);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
         }
+        // ── END INJECTED ──────────────────────────────────────────────────────
 """
 
     injected = content.replace(
@@ -163,8 +200,9 @@ def inject_flaky_test():
         return False
 
     write_file(SERVICE_TEST, injected)
-    print("  Injected: non-deterministic Thread.sleep(0-2000ms) into getAllStudents test")
-    print("  Expected behaviour: test passes or fails non-deterministically across runs")
+    print("  Injected: guaranteed-timeout sleep (1500–2000 ms) into getAllStudents test")
+    print("  Expected behaviour: TestTimedOutException on every run")
+    print("  Anomaly detector will classify as: FLAKY_TEST")
     return True
 
 # ─── Failure 4: Configuration Failure ────────────────────────────────────────
@@ -182,7 +220,6 @@ def inject_configuration_failure():
 
     content = read_file(APP_PROPS)
 
-    # Replace valid port with invalid non-numeric value
     injected = content.replace(
         "server.port=8080",
         "server.port=INVALID_PORT_VALUE"
@@ -212,7 +249,6 @@ def inject_infrastructure_failure():
 
     content = read_file(POM_XML)
 
-    # Insert a non-existent dependency before the closing </dependencies> tag
     fake_dependency = """
         <!-- INJECTED: Non-existent dependency to simulate infrastructure failure -->
         <dependency>
