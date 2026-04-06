@@ -41,69 +41,7 @@ class StudentServiceTest {
     void getAllStudents_shouldReturnAllStudents() {
         when(studentRepository.findAll()).thenReturn(Arrays.asList(student1, student2));
 
-        // ── INJECTED: Flaky sleep — always exceeds Surefire timeout ──────────
-        // BASE_SLEEP_MS (1500) + random jitter (0-500) guarantees the sleep
-        // breaches a 1000 ms per-test timeout on every run.
-        // Maven Surefire will terminate the test and emit:
-        //   TestTimedOutException: test timed out after 1000 milliseconds
-        // which is the keyword anomaly_detection.py uses to classify this
-        // failure as FLAKY_TEST rather than TEST_FAILURE.
-        try {
-            final long BASE_SLEEP_MS = 1500L;
-            final long JITTER_MS     = (long)(Math.random() * 500);
-            Thread.sleep(BASE_SLEEP_MS + JITTER_MS);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-        }
-        // ── END INJECTED ──────────────────────────────────────────────────────
-        // ── INJECTED: Realistic flaky timing near timeout threshold ─────────
-        // This sleep hovers around the usual 1000 ms timeout boundary.
-        // Some runs stay under the limit, others exceed it.
-        // That produces true fail-then-pass behaviour across retries.
-        try {
-            final long BASE_SLEEP_MS = 700L;
-            final long JITTER_MS     = (long)(Math.random() * 700L);
-            Thread.sleep(BASE_SLEEP_MS + JITTER_MS);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-        }
-        // ── END INJECTED ─────────────────────────────────────────────────────
-        // ── INJECTED: research-grade flaky behaviour ───────────────────────
-        // This models a realistic time-sensitive test: transient scheduler
-        // jitter, asynchronous background contention, and a strict service-
-        // level timeout. The service itself is correct, but the test becomes
-        // intermittently unstable under variable timing pressure.
-        final java.util.concurrent.atomic.AtomicReference<List<Student>> resultRef =
-                new java.util.concurrent.atomic.AtomicReference<>();
-        final java.util.concurrent.ThreadLocalRandom rnd =
-                java.util.concurrent.ThreadLocalRandom.current();
-        final int backgroundWorkers = rnd.nextInt(1, 4);
-        final int baseDelayMs = rnd.nextInt(250, 950);
-
-        org.junit.jupiter.api.Assertions.assertTimeoutPreemptively(
-                java.time.Duration.ofMillis(900),
-                () -> {
-                    java.util.List<java.util.concurrent.CompletableFuture<Void>> noise =
-                            new java.util.ArrayList<>();
-                    for (int i = 0; i < backgroundWorkers; i++) {
-                        final int workerDelayMs = baseDelayMs + rnd.nextInt(0, 180);
-                        noise.add(java.util.concurrent.CompletableFuture.runAsync(() -> {
-                            try {
-                                Thread.sleep(workerDelayMs);
-                            } catch (InterruptedException e) {
-                                Thread.currentThread().interrupt();
-                            }
-                        }));
-                    }
-                    for (java.util.concurrent.CompletableFuture<Void> task : noise) {
-                        task.join();
-                    }
-                    resultRef.set(studentService.getAllStudents());
-                }
-        );
-        // ── END INJECTED ────────────────────────────────────────────────────
-        List<Student> result = resultRef.get();
-
+        List<Student> result = studentService.getAllStudents();
 
         assertEquals(2, result.size());
         assertEquals("Alice", result.get(0).getName());
