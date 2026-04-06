@@ -249,99 +249,76 @@ jobs:
             ${{ runner.os }}-maven-
 
       # M4 — Automated retry of failed tests
-      # ── test output is tee'd to test.log and Surefire reports are
-      #    uploaded below — anomaly detection reads both sources.
-      - name: Run tests
+      # Revised: preserve every attempt's log and Surefire reports so that
+      # fail-then-pass behaviour can be detected instead of being overwritten
+      # by the final successful retry.
+      - name: Run tests with preserved attempt history
         id: test
-        uses: nick-fields/retry@v3
-        with:
-          timeout_minutes: ${{ env.TEST_TIMEOUT_MINUTES }}
-          max_attempts: ${{ env.MAX_RETRIES }}
-          retry_on: error
-          command: mvn test -B --no-transfer-progress 2>&1 | tee test.log
+        run: scripts/run_tests_with_attempts.sh
 
       # M5 — Flaky test quarantine
-      # After test execution, analyse the Surefire reports.
-      # Tests that fail on first attempt but pass on retry
-      # are automatically flagged as flaky candidates.
       - name: Analyse test results for flakiness
         if: always()
         run: |
           echo "=== M5: Flaky Test Quarantine Analysis ==="
-          REPORT_DIR="target/surefire-reports"
+          SUMMARY="artifacts/test-attempts/flaky_summary.json"
 
-          if [ ! -d "$REPORT_DIR" ]; then
-            echo "No Surefire reports found — skipping flakiness analysis"
+          if [ ! -f "$SUMMARY" ]; then
+            echo "No flaky summary found — skipping flakiness analysis"
             exit 0
           fi
 
-          # ── Look for TestTimedOutException specifically ────────────────────
-          # This is the canonical signal for a sleep-induced flaky failure.
-          # grep returns exit code 1 when nothing is found, which would abort
-          # the step — use "|| true" to keep the step passing regardless.
-          TIMED_OUT=$(grep -rl "TestTimedOutException\|test timed out" "$REPORT_DIR" 2>/dev/null || true)
-
-          if [ -n "$TIMED_OUT" ]; then
-            echo "FLAKY CANDIDATE DETECTED: TestTimedOutException found in:"
-            echo "$TIMED_OUT"
-            echo ""
-            echo "M5 action: these tests are flagged for quarantine."
-            echo "They will be excluded from the critical test gate on the next run"
-            echo "and tracked for trend analysis by M6."
-          else
-            FAILED_TESTS=$(grep -l "FAILED\|ERROR" "$REPORT_DIR"/*.txt 2>/dev/null || true)
-            if [ -z "$FAILED_TESTS" ]; then
-              echo "All tests passed — no flaky test candidates detected"
-            else
-              echo "Test failures found (deterministic, not flaky):"
-              echo "$FAILED_TESTS"
-            fi
-          fi
+          python3 - <<'PY2'
+          import json
+          from pathlib import Path
+          summary = json.loads(Path("artifacts/test-attempts/flaky_summary.json").read_text())
+          print(json.dumps(summary, indent=2))
+          if summary.get("flaky_detected"):
+              print()
+              print("FLAKY CANDIDATE DETECTED")
+              tests = summary.get("failed_then_passed_tests", [])
+              if tests:
+                  print("Tests that failed and then passed:")
+                  for test in tests:
+                      print(f"  - {test}")
+              else:
+                  print("Retry history indicates flaky behaviour, but per-test names were not fully recoverable.")
+              print("M5 action: these tests should be quarantined or isolated from the release gate.")
+          elif summary.get("always_failed_tests"):
+              print("Deterministic failures detected:")
+              for test in summary["always_failed_tests"]:
+                  print(f"  - {test}")
+          else:
+              print("All attempts passed — no flaky candidates detected in this run.")
+          PY2
 
       # M6 — Test result trend analysis
       - name: Test result trend analysis
         if: always()
         run: |
           echo "=== M6: Test Result Trend Analysis ==="
-          REPORT_DIR="target/surefire-reports"
+          python3 - <<'PY2'
+          import json
+          from pathlib import Path
+          summary_path = Path("artifacts/test-attempts/flaky_summary.json")
+          if not summary_path.exists():
+              print("No trend data available")
+              raise SystemExit(0)
+          summary = json.loads(summary_path.read_text())
+          print(f"Attempts executed: {summary['attempt_count']}")
+          print(f"Success after retry: {summary['success_after_retry']}")
+          print(f"Timeout observed: {summary['timeout_observed']}")
+          print(f"Flaky detected: {summary['flaky_detected']}")
+          if summary.get('failed_then_passed_tests'):
+              print("Recovered flaky tests:")
+              for test in summary['failed_then_passed_tests']:
+                  print(f"  - {test}")
+          if summary.get('always_failed_tests'):
+              print("Still failing after all retries:")
+              for test in summary['always_failed_tests']:
+                  print(f"  - {test}")
+          PY2
 
-          if [ ! -d "$REPORT_DIR" ]; then
-            echo "No Surefire reports found"
-            exit 0
-          fi
-
-          TOTAL=0
-          FAILED=0
-          ERRORS=0
-
-          for file in $REPORT_DIR/*.txt; do
-            [ -f "$file" ] || continue
-            t=$(grep -oP "Tests run: \K[0-9]+" "$file" 2>/dev/null || echo 0)
-            f=$(grep -oP "Failures: \K[0-9]+" "$file" 2>/dev/null || echo 0)
-            e=$(grep -oP "Errors: \K[0-9]+" "$file" 2>/dev/null || echo 0)
-            TOTAL=$((TOTAL + t))
-            FAILED=$((FAILED + f))
-            ERRORS=$((ERRORS + e))
-          done
-
-          PASSED=$((TOTAL - FAILED - ERRORS))
-          echo "Tests run:   $TOTAL"
-          echo "Passed:      $PASSED"
-          echo "Failed:      $FAILED"
-          echo "Errors:      $ERRORS"
-          echo ""
-
-          if [ "$FAILED" -gt 0 ] || [ "$ERRORS" -gt 0 ]; then
-            echo "TREND ALERT: Test failures detected."
-            echo "If failure count is increasing across runs, investigate root cause."
-          else
-            echo "TREND OK: All tests passed in this run."
-          fi
-
-      # Upload both the Maven output log AND the Surefire XML/TXT reports.
-      # The Surefire reports contain the full exception stack traces
-      # (including TestTimedOutException) that anomaly_detection.py reads
-      # via its collect_surefire_logs() function.
       - name: Upload test log
         if: always()
         uses: actions/upload-artifact@v4
@@ -358,6 +335,13 @@ jobs:
           path: target/surefire-reports/
           retention-days: 30
 
+      - name: Upload preserved test attempt history
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-attempt-history-${{ github.run_number }}
+          path: artifacts/test-attempts/
+          retention-days: 30
   # ═══════════════════════════════════════════
   # STAGE 3: PACKAGE
   # Mechanisms active:
@@ -513,15 +497,21 @@ jobs:
         continue-on-error: true   # artifact may not exist if test was skipped
 
       # Download Surefire reports from Stage 2.
-      # These .txt files contain the full exception traces including
-      # TestTimedOutException — the primary signal for flaky detection.
       - name: Download Surefire reports
         if: always()
         uses: actions/download-artifact@v4
         with:
           name: surefire-reports-${{ github.run_number }}
           path: target/surefire-reports/
-        continue-on-error: true   # artifact may not exist if tests did not run
+        continue-on-error: true
+
+      - name: Download preserved test attempt history
+        if: always()
+        uses: actions/download-artifact@v4
+        with:
+          name: test-attempt-history-${{ github.run_number }}
+          path: artifacts/test-attempts/
+        continue-on-error: true
 
       # Merge all downloaded log files into a single corpus for the detector.
       - name: Merge log files
