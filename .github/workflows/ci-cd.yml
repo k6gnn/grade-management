@@ -21,6 +21,7 @@ env:
   PACKAGE_TIMEOUT_MINUTES: '5'
   DEPLOY_TIMEOUT_MINUTES: '5'
   MAX_RETRIES: '3'
+  FLAKY_PROBE_RUNS: '2'
 
 jobs:
 
@@ -254,7 +255,9 @@ jobs:
       # by the final successful retry.
       - name: Run tests with preserved attempt history
         id: test
-        run: bash scripts/run_tests_with_attempts.sh
+        run: |
+          chmod +x scripts/run_tests_with_attempts.sh
+          bash scripts/run_tests_with_attempts.sh
 
       # M5 — Flaky test quarantine
       - name: Analyse test results for flakiness
@@ -276,9 +279,9 @@ jobs:
           if summary.get("flaky_detected"):
               print()
               print("FLAKY CANDIDATE DETECTED")
-              tests = summary.get("failed_then_passed_tests", [])
+              tests = summary.get("failed_then_passed_tests", []) or summary.get("intermittent_tests", [])
               if tests:
-                  print("Tests that failed and then passed:")
+                  print("Intermittent tests observed across retries/probes:")
                   for test in tests:
                       print(f"  - {test}")
               else:
@@ -306,9 +309,11 @@ jobs:
               raise SystemExit(0)
           summary = json.loads(summary_path.read_text())
           print(f"Attempts executed: {summary['attempt_count']}")
-          print(f"Success after retry: {summary['success_after_retry']}")
+          print(f"Gate success after retry: {summary['gate_success_after_retry']}")
+          print(f"Probe failures observed: {summary['probe_failures_observed']}")
           print(f"Timeout observed: {summary['timeout_observed']}")
           print(f"Flaky detected: {summary['flaky_detected']}")
+          print(f"Detection basis: {summary['detection_basis']}")
           if summary.get('failed_then_passed_tests'):
               print("Recovered flaky tests:")
               for test in summary['failed_then_passed_tests']:

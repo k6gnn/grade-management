@@ -3,14 +3,14 @@
 Failure Injection Script
 ========================
 Revised for thesis realism:
-- flaky injection is truly intermittent instead of guaranteed failure,
+- flaky injection models realistic asynchronous timing instability rather than
+  a trivial fixed failure,
 - injection fails fast when the target line is not found,
-- random timing hovers around the timeout threshold so CI can observe
-  fail-then-pass behaviour across retries.
+- the scenario combines scheduler jitter, background contention, and an
+  explicit timeout so CI can observe intermittent behaviour reproducibly.
 """
 
 import os
-import random
 import shutil
 import sys
 
@@ -97,30 +97,53 @@ def inject_flaky_test():
     content = read_file(SERVICE_TEST)
 
     flaky_code = """\
-        // ── INJECTED: Realistic flaky timing near timeout threshold ─────────
-        // This sleep hovers around the usual 1000 ms timeout boundary.
-        // Some runs stay under the limit, others exceed it.
-        // That produces true fail-then-pass behaviour across retries.
-        try {
-            final long BASE_SLEEP_MS = 700L;
-            final long JITTER_MS     = (long)(Math.random() * 700L);
-            Thread.sleep(BASE_SLEEP_MS + JITTER_MS);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-        }
-        // ── END INJECTED ─────────────────────────────────────────────────────
+        // ── INJECTED: research-grade flaky behaviour ───────────────────────
+        // This models a realistic time-sensitive test: transient scheduler
+        // jitter, asynchronous background contention, and a strict service-
+        // level timeout. The service itself is correct, but the test becomes
+        // intermittently unstable under variable timing pressure.
+        final java.util.concurrent.atomic.AtomicReference<List<Student>> resultRef =
+                new java.util.concurrent.atomic.AtomicReference<>();
+        final java.util.concurrent.ThreadLocalRandom rnd =
+                java.util.concurrent.ThreadLocalRandom.current();
+        final int backgroundWorkers = rnd.nextInt(1, 4);
+        final int baseDelayMs = rnd.nextInt(250, 950);
+
+        org.junit.jupiter.api.Assertions.assertTimeoutPreemptively(
+                java.time.Duration.ofMillis(900),
+                () -> {
+                    java.util.List<java.util.concurrent.CompletableFuture<Void>> noise =
+                            new java.util.ArrayList<>();
+                    for (int i = 0; i < backgroundWorkers; i++) {
+                        final int workerDelayMs = baseDelayMs + rnd.nextInt(0, 180);
+                        noise.add(java.util.concurrent.CompletableFuture.runAsync(() -> {
+                            try {
+                                Thread.sleep(workerDelayMs);
+                            } catch (InterruptedException e) {
+                                Thread.currentThread().interrupt();
+                            }
+                        }));
+                    }
+                    for (java.util.concurrent.CompletableFuture<Void> task : noise) {
+                        task.join();
+                    }
+                    resultRef.set(studentService.getAllStudents());
+                }
+        );
+        // ── END INJECTED ────────────────────────────────────────────────────
+        List<Student> result = resultRef.get();
 """
 
     injected = replace_once_or_raise(
         content,
         "        List<Student> result = studentService.getAllStudents();",
-        flaky_code + "        List<Student> result = studentService.getAllStudents();",
+        flaky_code,
         "flaky",
     )
     write_file(SERVICE_TEST, injected)
-    print("  Injected: intermittent timing jitter (700–1400 ms) near timeout boundary")
-    print("  Expected behaviour: some attempts pass, some attempts timeout")
-    print("  Expected CI signature: failed on one attempt, passed on later retry")
+    print("  Injected: asynchronous contention + bounded timeout + scheduler jitter")
+    print("  Research intent: simulate a realistic non-deterministic timing failure")
+    print("  Expected CI signature: intermittent timeout or fail-then-pass across retries/probes")
     return True
 
 

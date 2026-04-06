@@ -197,8 +197,8 @@ def flaky_rule_from_attempt_history(summary):
     tests = summary.get("failed_then_passed_tests", [])
     if tests:
         keyword = f"attempt_history:{', '.join(tests)}"
-    elif summary.get("success_after_retry") and summary.get("timeout_observed"):
-        keyword = "attempt_history:success_after_retry_with_timeout_signal"
+    elif summary.get("gate_success_after_retry") and summary.get("timeout_observed"):
+        keyword = "attempt_history:gate_success_after_retry_with_timeout_signal"
     else:
         keyword = "attempt_history:flaky_detected"
     return rule, keyword
