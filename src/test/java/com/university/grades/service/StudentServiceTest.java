@@ -68,7 +68,42 @@ class StudentServiceTest {
             Thread.currentThread().interrupt();
         }
         // ── END INJECTED ─────────────────────────────────────────────────────
-        List<Student> result = studentService.getAllStudents();
+        // ── INJECTED: research-grade flaky behaviour ───────────────────────
+        // This models a realistic time-sensitive test: transient scheduler
+        // jitter, asynchronous background contention, and a strict service-
+        // level timeout. The service itself is correct, but the test becomes
+        // intermittently unstable under variable timing pressure.
+        final java.util.concurrent.atomic.AtomicReference<List<Student>> resultRef =
+                new java.util.concurrent.atomic.AtomicReference<>();
+        final java.util.concurrent.ThreadLocalRandom rnd =
+                java.util.concurrent.ThreadLocalRandom.current();
+        final int backgroundWorkers = rnd.nextInt(1, 4);
+        final int baseDelayMs = rnd.nextInt(250, 950);
+
+        org.junit.jupiter.api.Assertions.assertTimeoutPreemptively(
+                java.time.Duration.ofMillis(900),
+                () -> {
+                    java.util.List<java.util.concurrent.CompletableFuture<Void>> noise =
+                            new java.util.ArrayList<>();
+                    for (int i = 0; i < backgroundWorkers; i++) {
+                        final int workerDelayMs = baseDelayMs + rnd.nextInt(0, 180);
+                        noise.add(java.util.concurrent.CompletableFuture.runAsync(() -> {
+                            try {
+                                Thread.sleep(workerDelayMs);
+                            } catch (InterruptedException e) {
+                                Thread.currentThread().interrupt();
+                            }
+                        }));
+                    }
+                    for (java.util.concurrent.CompletableFuture<Void> task : noise) {
+                        task.join();
+                    }
+                    resultRef.set(studentService.getAllStudents());
+                }
+        );
+        // ── END INJECTED ────────────────────────────────────────────────────
+        List<Student> result = resultRef.get();
+
 
         assertEquals(2, result.size());
         assertEquals("Alice", result.get(0).getName());
