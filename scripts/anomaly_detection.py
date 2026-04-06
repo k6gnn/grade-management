@@ -186,16 +186,42 @@ def classify_from_log(log_text):
 
 # ─── Status-based classification ──────────────────────────────────────────────
 
-def classify_from_status(build, test, package_):
+def classify_from_status(build, test, package_, log_text=None):
     """
-    Classifies failure type based on which pipeline stages failed.
+    Classifies failure type based on pipeline stages.
+    If log text is available, prefer configuration signals before
+    falling back to generic test failure.
     """
+
+    # 🔥 NEW: detect configuration from log hints even in fallback
+    if log_text:
+        config_signals = [
+            "ApplicationContext",
+            "BeanCreationException",
+            "Failed to bind properties",
+            "INVALID_PORT_VALUE",
+            "NumberFormatException",
+            "Error creating bean",
+            "Unsatisfied dependency",
+            "Could not resolve placeholder",
+            "application.properties",
+        ]
+        for signal in config_signals:
+            if re.search(signal, log_text, re.IGNORECASE):
+                return next(
+                    (r for r in CLASSIFICATION_RULES if r["failure_type"] == "configuration"),
+                    None
+                )
+
+    # Original logic
     key = (build, test, package_)
     failure_type = STATUS_RULES.get(key)
     if failure_type:
-        rule = next((r for r in CLASSIFICATION_RULES
-                     if r["failure_type"] == failure_type), None)
-        return rule
+        return next(
+            (r for r in CLASSIFICATION_RULES if r["failure_type"] == failure_type),
+            None
+        )
+
     return None
 
 # ─── Parse pipeline status file ───────────────────────────────────────────────
@@ -266,6 +292,9 @@ def main():
     # This is the preferred path — it can distinguish flaky_test from
     # test_failure even when both ultimately show test_status=failure,
     # because the RuntimeException message appears in the surefire log.
+
+    log_text = None
+
     if log_file and os.path.exists(log_file):
         print(f"  Reading log file: {log_file}")
         log_text = open(log_file).read()
@@ -276,9 +305,9 @@ def main():
 
     # Step 2: Fall back to status-based classification.
     if not matched_rule:
-        matched_rule = classify_from_status(build_s, test_s, package_s)
-        if matched_rule:
-            classification_method = "stage_status_analysis"
+            matched_rule = classify_from_status(build_s, test_s, package_s)
+            if matched_rule:
+                classification_method = "stage_status_analysis"
 
     # Step 3: Unknown if no rule matched.
     if not matched_rule:

@@ -118,6 +118,29 @@ jobs:
             fi
           done
 
+          PORT=$(grep '^server.port=' "$PROPS" | head -1 | cut -d'=' -f2- | tr -d '[:space:]')
+          if ! [[ "$PORT" =~ ^[0-9]+$ ]]; then
+            echo "FAILURE: server.port must be numeric, got '$PORT'"
+            exit 1
+          fi
+
+          if [ "$PORT" -lt 1 ] || [ "$PORT" -gt 65535 ]; then
+            echo "FAILURE: server.port must be between 1 and 65535, got '$PORT'"
+            exit 1
+          fi
+
+          APP_NAME=$(grep '^spring.application.name=' "$PROPS" | head -1 | cut -d'=' -f2-)
+          if [ -z "$(echo "$APP_NAME" | tr -d '[:space:]')" ]; then
+            echo "FAILURE: spring.application.name cannot be empty"
+            exit 1
+          fi
+
+          DB_URL=$(grep '^spring.datasource.url=' "$PROPS" | head -1 | cut -d'=' -f2-)
+          if [ -z "$(echo "$DB_URL" | tr -d '[:space:]')" ]; then
+            echo "FAILURE: spring.datasource.url cannot be empty"
+            exit 1
+          fi
+
           echo "Configuration validation passed."
 
   # ═══════════════════════════════════════════
@@ -236,13 +259,13 @@ jobs:
           max_attempts: ${{ env.MAX_RETRIES }}
           retry_on: error
           command: |
-            mvn test -B --no-transfer-progress
-            EXIT_CODE=$?
+            mvn test -B --no-transfer-progress 2>&1 | tee -a test.log
+            EXIT_CODE=${PIPESTATUS[0]}
             if [ $EXIT_CODE -ne 0 ]; then
               TIMESTAMP=$(date -u +%H:%M:%S)
               echo "ATTEMPT_FAILED at $TIMESTAMP (exit_code=$EXIT_CODE)" >> flaky_failure_log.txt
               if [ -d "target/surefire-reports" ]; then
-                grep -h "FAILED\|ERROR\|RuntimeException\|Simulated transient\|timed out\|instability" \
+                grep -h "FAILED\|ERROR\|RuntimeException\|Simulated transient\|timed out\|instability\|ApplicationContext\|BeanCreationException\|INVALID_PORT_VALUE\|NumberFormatException" \
                   target/surefire-reports/*.txt 2>/dev/null >> flaky_failure_log.txt || true
               fi
             fi
@@ -482,10 +505,15 @@ jobs:
       - name: Run anomaly detection script
         run: |
           echo "=== M13: Build Log Anomaly Detection ==="
-          echo "build_status=${{ needs.build.result }}"     >> pipeline_status.txt
-          echo "test_status=${{ needs.test.result }}"       >> pipeline_status.txt
-          echo "package_status=${{ needs.package.result }}" >> pipeline_status.txt
-          python scripts/anomaly_detection.py pipeline_status.txt
+              echo "build_status=${{ needs.build.result }}"     >> pipeline_status.txt
+              echo "test_status=${{ needs.test.result }}"       >> pipeline_status.txt
+              echo "package_status=${{ needs.package.result }}" >> pipeline_status.txt
+
+              if [ -f test.log ]; then
+                python scripts/anomaly_detection.py pipeline_status.txt test.log
+              else
+                python scripts/anomaly_detection.py pipeline_status.txt
+              fi
 
       - name: Upload anomaly detection report
         if: always()
