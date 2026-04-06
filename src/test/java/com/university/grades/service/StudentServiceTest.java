@@ -41,16 +41,6 @@ class StudentServiceTest {
     void getAllStudents_shouldReturnAllStudents() {
         when(studentRepository.findAll()).thenReturn(Arrays.asList(student1, student2));
 
-
-        // INJECTED: Non-deterministic sleep to simulate flaky behaviour
-        // Sleep duration varies randomly between 0 and 2000ms.
-        // If the test framework timeout is 1000ms, this will fail ~50% of runs.
-        try {
-            long sleepDuration = (long)(Math.random() * 2000);
-            Thread.sleep(sleepDuration);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-        }
         List<Student> result = studentService.getAllStudents();
 
         assertEquals(2, result.size());
