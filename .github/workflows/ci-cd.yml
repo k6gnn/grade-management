@@ -254,7 +254,7 @@ jobs:
       # by the final successful retry.
       - name: Run tests with preserved attempt history
         id: test
-        run: scripts/run_tests_with_attempts.sh
+        run: bash scripts/run_tests_with_attempts.sh
 
       # M5 — Flaky test quarantine
       - name: Analyse test results for flakiness
