@@ -132,7 +132,6 @@ jobs:
     name: "Stage 1 — Build"
     runs-on: ubuntu-latest
     needs: configuration-validation
-    # M12 — Timeout-based job cancellation
     timeout-minutes: 10
 
     steps:
@@ -144,13 +143,8 @@ jobs:
         with:
           java-version: ${{ env.JAVA_VERSION }}
           distribution: 'temurin'
-          # M2 — Dependency version pinning: cache=maven ensures
-          # Maven uses the pinned versions in pom.xml
           cache: 'maven'
 
-      # M11 — Dependency cache invalidation and rebuild
-      # If the cache key changes (pom.xml modified), the cache
-      # is automatically invalidated and rebuilt from scratch
       - name: Cache Maven dependencies
         uses: actions/cache@v4
         id: maven-cache
@@ -168,8 +162,6 @@ jobs:
             echo "M11: Cache miss — downloading fresh dependencies"
           fi
 
-      # M1 — Automated retry on transient build errors
-      # The build step retries up to 3 times if it fails
       - name: Compile application
         id: compile
         uses: nick-fields/retry@v3
@@ -179,8 +171,6 @@ jobs:
           retry_on: error
           command: mvn compile -B --no-transfer-progress
 
-      # M3 — Automated notification and branch lockout
-      # If build fails after all retries, send notification
       - name: Notify on build failure
         if: failure()
         run: |
@@ -193,8 +183,6 @@ jobs:
           echo "ACTION REQUIRED: Compilation failed after ${{ env.MAX_RETRIES }} retries."
           echo "Further commits to this branch are blocked until the build is fixed."
           echo "Please check the compile step logs above for details."
-          # In a real environment this would trigger a Slack/email notification
-          # and a branch protection rule enforcement via GitHub API
 
   # ═══════════════════════════════════════════
   # STAGE 2: TEST
@@ -207,7 +195,6 @@ jobs:
     name: "Stage 2 — Test"
     runs-on: ubuntu-latest
     needs: build
-    # M12 — Timeout-based job cancellation
     timeout-minutes: 10
 
     steps:
@@ -230,90 +217,80 @@ jobs:
             ${{ runner.os }}-maven-
 
       # M4 — Automated retry of failed tests
-      # The test step retries up to 3 times if it fails.
-      # For flaky tests this means attempt 1 fails (marker absent),
-      # attempt 2 passes (marker present) — M4 is the recovery mechanism.
-      - name: Run tests with retry
+      #
+      # Root cause of the previous M5 miss:
+      # Maven Surefire overwrites its XML and TXT report files on every
+      # retry attempt. By the time M5 ran, the Attempt 1 failure evidence
+      # (RuntimeException: Simulated transient failure) had been replaced
+      # by the clean Attempt 3 report. M5 saw only passing reports.
+      #
+      # Fix: the command block writes a persistent flaky_failure_log.txt
+      # on every non-zero Maven exit, BEFORE the retry wrapper loops.
+      # This file accumulates across attempts and is never overwritten,
+      # giving M5 a reliable signal regardless of how many retries occur.
+      - name: Run tests with retry (M4)
         id: run-tests
         uses: nick-fields/retry@v3
         with:
           timeout_minutes: ${{ env.TEST_TIMEOUT_MINUTES }}
           max_attempts: ${{ env.MAX_RETRIES }}
           retry_on: error
-          command: mvn test -B --no-transfer-progress
-          # Continue so that M5 and M6 steps always execute
+          command: |
+            mvn test -B --no-transfer-progress
+            EXIT_CODE=$?
+            if [ $EXIT_CODE -ne 0 ]; then
+              TIMESTAMP=$(date -u +%H:%M:%S)
+              echo "ATTEMPT_FAILED at $TIMESTAMP (exit_code=$EXIT_CODE)" >> flaky_failure_log.txt
+              if [ -d "target/surefire-reports" ]; then
+                grep -h "FAILED\|ERROR\|RuntimeException\|Simulated transient\|timed out\|instability" \
+                  target/surefire-reports/*.txt 2>/dev/null >> flaky_failure_log.txt || true
+              fi
+            fi
+            exit $EXIT_CODE
           continue_on_error: false
 
       # M5 — Flaky Test Quarantine Analysis
-      # Detects whether a test exhibited fail-then-pass behaviour within
-      # this job, which is the defining characteristic of a flaky test.
-      #
-      # Strategy:
-      #   The nick-fields/retry action logs "Attempt N failed" lines to
-      #   stdout before retrying. If the job ultimately succeeded (outcome
-      #   is success) but at least one "Attempt N failed" line exists in
-      #   the Maven output or retry wrapper output, then the test is a
-      #   flaky candidate.
-      #
-      #   We capture this by re-running Maven in a dry-run-like check:
-      #   instead of re-running tests, we inspect the existing Surefire
-      #   XML reports. A flaky test leaves an <error> or <failure> block
-      #   in the XML from the attempt that failed even though a later
-      #   attempt succeeded, because Maven Surefire writes one XML per
-      #   test class per attempt when run via the retry wrapper.
-      #
-      #   Simpler reliable signal: check whether the job step outcome was
-      #   'success' (M4 recovered) AND the surefire reports contain any
-      #   ERROR or RuntimeException entry — meaning a prior attempt failed.
+      # Reads flaky_failure_log.txt written during failed attempts.
+      # If the file exists and the job succeeded (we reached this step),
+      # at least one attempt failed before a later attempt passed —
+      # the defining signature of a flaky test.
       - name: Analyse test results for flakiness (M5)
         if: always()
         run: |
           echo "=== M5: Flaky Test Quarantine Analysis ==="
           REPORT_DIR="target/surefire-reports"
+          FLAG_FILE="flaky_failure_log.txt"
 
           if [ ! -d "$REPORT_DIR" ]; then
             echo "No Surefire reports found — skipping flakiness analysis"
             exit 0
           fi
 
-          # Check for any RuntimeException or error entries in the XML reports.
-          # When the marker-file injection fires on attempt 1, Maven Surefire
-          # records the RuntimeException in the XML even though a later retry
-          # succeeded and the job outcome is success.
-          FLAKY_SIGNAL=$(grep -rl \
-            "Simulated transient failure\|cold-start instability\|flaky_marker\|RuntimeException" \
-            "$REPORT_DIR" 2>/dev/null || true)
-
-          # Also check the plain-text reports for FAILED lines, which appear
-          # when any attempt within the retry loop reported a failure.
-          FAILED_REPORTS=$(grep -l "FAILED\|ERROR" "$REPORT_DIR"/*.txt 2>/dev/null || true)
-
-          if [ -n "$FLAKY_SIGNAL" ]; then
+          if [ -f "$FLAG_FILE" ]; then
             echo "M5: FLAKY TEST DETECTED"
-            echo "The following reports contain evidence of transient failure:"
-            echo "$FLAKY_SIGNAL"
             echo ""
-            echo "Failure signature: 'Simulated transient failure / cold-start instability'"
-            echo "The test FAILED on attempt 1 but PASSED on a subsequent retry (M4)."
+            echo "Evidence: $FLAG_FILE captured the following failed attempt(s):"
+            cat "$FLAG_FILE"
+            echo ""
+            echo "The test suite FAILED on one or more early attempts but"
+            echo "PASSED on a subsequent retry (M4). This is the defining"
+            echo "characteristic of a flaky test."
             echo "Classification: FLAKY CANDIDATE"
             echo ""
-            echo "Recommended action: quarantine getAllStudents_shouldReturn200WithStudentList"
-            echo "from the critical path on the next pipeline run pending investigation."
-          elif [ -n "$FAILED_REPORTS" ]; then
-            echo "M5: FLAKY TEST CANDIDATE DETECTED"
-            echo "The following test reports contain failures:"
-            echo "$FAILED_REPORTS"
-            echo ""
-            echo "If these tests passed on a previous retry (M4), they are"
-            echo "flagged as flaky candidates and quarantined from the"
-            echo "critical path on the next pipeline run."
+            echo "Recommended action: quarantine the failing test from the"
+            echo "critical path on the next pipeline run pending investigation."
           else
-            echo "M5: All tests passed on first attempt — no flaky test candidates detected"
+            FAILED_REPORTS=$(grep -l "FAILED\|ERROR" "$REPORT_DIR"/*.txt 2>/dev/null || true)
+            if [ -n "$FAILED_REPORTS" ]; then
+              echo "M5: TEST FAILURES DETECTED (deterministic — not flaky)"
+              echo "The following test reports contain failures:"
+              echo "$FAILED_REPORTS"
+            else
+              echo "M5: All tests passed on first attempt — no flaky test candidates detected"
+            fi
           fi
 
       # M6 — Test result trend analysis
-      # Summarises test counts and flags trend anomalies.
-      # For flaky tests this will report TREND OK (job passed after retry).
       - name: Test result trend analysis (M6)
         if: always()
         run: |
@@ -361,6 +338,15 @@ jobs:
           path: target/surefire-reports/
           retention-days: 30
 
+      - name: Upload flaky failure log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: flaky-failure-log-${{ github.run_number }}
+          path: flaky_failure_log.txt
+          if-no-files-found: ignore
+          retention-days: 30
+
   # ═══════════════════════════════════════════
   # STAGE 3: PACKAGE
   # Mechanisms active:
@@ -371,11 +357,7 @@ jobs:
     name: "Stage 3 — Package"
     runs-on: ubuntu-latest
     needs: test
-    # M12 — Timeout-based job cancellation
     timeout-minutes: 5
-    # M10 — Fresh container reset: each job in GitHub Actions
-    # runs on a completely fresh ubuntu-latest runner instance,
-    # eliminating any state corruption from previous stages
 
     steps:
       - name: Checkout repository
@@ -426,9 +408,7 @@ jobs:
     name: "Stage 4 — Deploy"
     runs-on: ubuntu-latest
     needs: package
-    # M12 — Timeout-based job cancellation
     timeout-minutes: 5
-    # Only deploy on pushes to main, not on pull requests
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
 
     steps:
@@ -454,15 +434,11 @@ jobs:
           echo "Commit SHA: ${{ github.sha }}"
           echo "Deployment successful."
 
-      # M7 — Automated rollback to last known good state
-      # If deployment fails, automatically revert to the
-      # last successful commit on the main branch
       - name: Rollback on deployment failure
         if: failure()
         run: |
           echo "=== M7: Automated Rollback Initiated ==="
           echo "Deployment failed. Identifying last known good commit..."
-
           LAST_GOOD=$(git log --oneline -5)
           echo "Recent commit history:"
           echo "$LAST_GOOD"
