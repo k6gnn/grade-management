@@ -56,6 +56,18 @@ class StudentServiceTest {
             Thread.currentThread().interrupt();
         }
         // ── END INJECTED ──────────────────────────────────────────────────────
+        // ── INJECTED: Realistic flaky timing near timeout threshold ─────────
+        // This sleep hovers around the usual 1000 ms timeout boundary.
+        // Some runs stay under the limit, others exceed it.
+        // That produces true fail-then-pass behaviour across retries.
+        try {
+            final long BASE_SLEEP_MS = 700L;
+            final long JITTER_MS     = (long)(Math.random() * 700L);
+            Thread.sleep(BASE_SLEEP_MS + JITTER_MS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+        // ── END INJECTED ─────────────────────────────────────────────────────
         List<Student> result = studentService.getAllStudents();
 
         assertEquals(2, result.size());
