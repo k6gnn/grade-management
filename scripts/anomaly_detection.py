@@ -127,7 +127,6 @@ CLASSIFICATION_RULES = [
 # which is why log-based classification (Step 1) is tried first.
 
 STATUS_RULES = {
-    ("success", "failure", "skipped", "skipped"): "infrastructure",  # build failed
     ("success", "failure", "success",  "skipped"): "test_failure",
     ("success", "failure", "skipped",  "success"): "test_failure",
     ("failure", "skipped", "skipped",  "skipped"): "configuration",  # M8 blocked

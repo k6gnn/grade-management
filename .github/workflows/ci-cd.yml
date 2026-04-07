@@ -192,7 +192,19 @@ jobs:
           timeout_minutes: ${{ env.BUILD_TIMEOUT_MINUTES }}
           max_attempts: ${{ env.MAX_RETRIES }}
           retry_on: error
-          command: mvn compile -B --no-transfer-progress
+          command: |
+            mvn compile -B --no-transfer-progress 2>&1 | tee -a build.log
+            EXIT_CODE=${PIPESTATUS[0]}
+            exit $EXIT_CODE
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log-${{ github.run_number }}
+          path: build.log
+          if-no-files-found: ignore
+          retention-days: 30
 
       - name: Notify on build failure
         if: failure()
@@ -502,6 +514,13 @@ jobs:
         with:
           python-version: '3.11'
 
+      - name: Download build log
+        uses: actions/download-artifact@v4
+        with:
+          name: build-log-${{ github.run_number }}
+          path: logs/
+        continue-on-error: true
+
       - name: Run anomaly detection script
         run: |
           echo "=== M13: Build Log Anomaly Detection ==="
@@ -510,7 +529,9 @@ jobs:
           echo "test_status=${{ needs.test.result }}"                      >> pipeline_status.txt
           echo "package_status=${{ needs.package.result }}"                >> pipeline_status.txt
 
-          if [ -f test.log ]; then
+          if [ -f logs/build.log ]; then
+            python scripts/anomaly_detection.py pipeline_status.txt logs/build.log
+          elif [ -f test.log ]; then
             python scripts/anomaly_detection.py pipeline_status.txt test.log
           else
             python scripts/anomaly_detection.py pipeline_status.txt
