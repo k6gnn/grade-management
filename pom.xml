@@ -54,13 +54,6 @@
             <artifactId>spring-boot-starter-test</artifactId>
             <scope>test</scope>
         </dependency>
-
-        <!-- INJECTED: Non-existent dependency to simulate infrastructure failure -->
-        <dependency>
-            <groupId>com.nonexistent.library</groupId>
-            <artifactId>does-not-exist</artifactId>
-            <version>9.9.9</version>
-        </dependency>
     </dependencies>
 
     <build>
