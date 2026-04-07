@@ -57,8 +57,6 @@ CLASSIFICATION_RULES = [
             "Connection refused",
             "Could not transfer artifact",
             "Failed to read artifact descriptor",
-            "does-not-exist",
-            "nonexistent",
         ],
         "root_cause":      "External dependency unavailable or Maven repository unreachable",
         "recommended_mechanisms": ["M1 — Automated retry", "M10 — Fresh container reset", "M11 — Cache invalidation"],
@@ -227,10 +225,10 @@ def classify_from_status(config, build, test, package_, log_text=None):
     if log_text:
         infra_signals = [
             "Could not resolve dependencies",
-            "does-not-exist",
-            "artifact.*not found",
-            "nonexistent",
             "DependencyResolutionException",
+            "Could not transfer artifact",
+            "Failed to read artifact descriptor",
+            "Cannot access.*repository",
         ]
         for signal in infra_signals:
             if re.search(signal, log_text, re.IGNORECASE):
