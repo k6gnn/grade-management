@@ -15,6 +15,7 @@ Usage (standalone for testing):
     python scripts/anomaly_detection.py pipeline_status.txt [log_file.txt]
 """
 
+from logging import config
 import sys
 import os
 import json
@@ -128,12 +129,12 @@ CLASSIFICATION_RULES = [
 # which is why log-based classification (Step 1) is tried first.
 
 STATUS_RULES = {
-    ("failure", "success", "success"): "compilation",
-    ("failure", "skipped", "skipped"): "compilation",
-    ("success", "failure", "success"): "test_failure",
-    ("success", "failure", "skipped"): "test_failure",
-    ("success", "success", "failure"): "infrastructure",
-    ("failure", "failure", "failure"): "compilation",
+    ("success", "failure", "skipped", "skipped"): "infrastructure",  # build failed
+    ("success", "failure", "success",  "skipped"): "test_failure",
+    ("success", "failure", "skipped",  "success"): "test_failure",
+    ("failure", "skipped", "skipped",  "skipped"): "configuration",  # M8 blocked
+    ("success", "success", "failure",  "skipped"): "test_failure",
+    ("success", "success", "success",  "failure"): "infrastructure",
 }
 
 # ─── Metric Calculation ───────────────────────────────────────────────────────
@@ -224,6 +225,20 @@ def classify_from_status(config, build, test, package_, log_text=None):
 
     # Optional log-aware fallback for configuration-like test failures
     if log_text:
+        infra_signals = [
+            "Could not resolve dependencies",
+            "does-not-exist",
+            "artifact.*not found",
+            "nonexistent",
+            "DependencyResolutionException",
+        ]
+        for signal in infra_signals:
+            if re.search(signal, log_text, re.IGNORECASE):
+                return next(
+                    (r for r in CLASSIFICATION_RULES if r["failure_type"] == "infrastructure"),
+                    None
+                )
+            
         config_signals = [
             "ApplicationContext",
             "BeanCreationException",
@@ -242,7 +257,7 @@ def classify_from_status(config, build, test, package_, log_text=None):
                     None
                 )
 
-    key = (build, test, package_)
+    key = (config, build, test, package_)
     failure_type = STATUS_RULES.get(key)
     if failure_type:
         return next(
