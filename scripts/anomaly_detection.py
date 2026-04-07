@@ -176,12 +176,33 @@ def calculate_detection_metrics(classified_type, actual_type=None):
 def classify_from_log(log_text):
     """
     Scans log text against classification rules.
-    Returns the first matching rule or None.
+    Uses two-pass logic for ambiguous keywords:
+    BUILD FAILURE appears in both compilation and infrastructure failures,
+    so if it is present we first check for infrastructure-specific keywords
+    before falling back to compilation.
     """
+    # Pass 1: try all rules using their specific (non-ambiguous) keywords only.
+    # BUILD FAILURE is excluded from this pass — it is too generic.
+    AMBIGUOUS = {"BUILD FAILURE"}
+
     for rule in CLASSIFICATION_RULES:
         for keyword in rule["keywords"]:
+            if keyword in AMBIGUOUS:
+                continue
             if re.search(keyword, log_text, re.IGNORECASE):
                 return rule, keyword
+
+    # Pass 2: if no specific keyword matched, check whether the ambiguous
+    # keyword BUILD FAILURE is present and fall back to compilation as the
+    # default Maven build failure type.
+    if re.search("BUILD FAILURE", log_text, re.IGNORECASE):
+        rule = next(
+            (r for r in CLASSIFICATION_RULES if r["failure_type"] == "compilation"),
+            None
+        )
+        if rule:
+            return rule, "BUILD FAILURE"
+
     return None, None
 
 # ─── Status-based classification ──────────────────────────────────────────────
