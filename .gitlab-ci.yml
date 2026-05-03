@@ -1,0 +1,429 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# GitLab CI/CD Pipeline with Self-Healing Mechanisms M1–M14
+# Thesis: Evaluation of Self-Healing Mechanisms in CI/CD Pipelines
+# Student: Kanan Badalov, RTU
+#
+# M14 runs first as a warning-only proactive risk predictor.
+# M13 runs last with when: always as an ML-based post-pipeline failure classifier.
+# ─────────────────────────────────────────────────────────────────────────────
+
+variables:
+  JAVA_VERSION: "21"
+  MAVEN_OPTS: "-Xmx1024m -Dmaven.repo.local=$CI_PROJECT_DIR/.m2/repository"
+  APP_NAME: "grade-management"
+  BUILD_TIMEOUT_MINUTES: "10"
+  TEST_TIMEOUT_MINUTES: "10"
+  MAX_RETRIES: "3"
+  MAVEN_CLI_OPTS: "-B --no-transfer-progress"
+  M14_THRESHOLD_MODE: "balanced"
+  M14_MODE: "warning_only"
+
+stages:
+  - risk-assessment   # M14
+  - pre-pipeline      # M9, M8
+  - build             # M1, M2, M3, M11
+  - test              # M4, M5, M6
+  - package           # M10, M12
+  - deploy            # M7, M12
+  - post-pipeline     # M13
+
+.maven_cache:
+  cache:
+    key:
+      files:
+        - pom.xml
+    paths:
+      - .m2/repository
+    policy: pull-push
+
+# ═════════════════════════════════════════════════════════════════════════════
+# M14 — Proactive Failure Risk Assessment
+# Runs before the normal pipeline. Warning-only: never blocks experiment runs.
+# ═════════════════════════════════════════════════════════════════════════════
+m14-risk-assessment:
+  stage: risk-assessment
+  image: python:3.11-slim
+  timeout: 5 minutes
+  allow_failure: true
+  script:
+    - echo "=== M14: Proactive Failure Risk Assessment ==="
+    - python -m pip install --upgrade pip -q
+    - pip install -q pandas numpy scikit-learn joblib requests
+    - |
+      python scripts/m14_predict.py \
+        --platform gitlab \
+        --repository "$CI_PROJECT_PATH" \
+        --commit "$CI_COMMIT_SHA" \
+        --branch "$CI_COMMIT_REF_NAME" \
+        --event "$CI_PIPELINE_SOURCE" \
+        --workflow "gitlab-pipeline" \
+        --model models/m14_model.pkl \
+        --config models/m14_config.pkl \
+        --threshold-mode "$M14_THRESHOLD_MODE" \
+        --mode "$M14_MODE" \
+        --output m14_risk_report.json
+    - cat m14_risk_report.json
+  artifacts:
+    name: "m14-risk-report-$CI_PIPELINE_IID"
+    when: always
+    expire_in: 30 days
+    paths:
+      - m14_risk_report.json
+
+# ═════════════════════════════════════════════════════════════════════════════
+# M9 — Environment Variable Verification
+# ═════════════════════════════════════════════════════════════════════════════
+environment-verification:
+  stage: pre-pipeline
+  image: ubuntu:22.04
+  timeout: 2 minutes
+  needs:
+    - job: m14-risk-assessment
+      optional: true
+  script:
+    - echo "=== M9 Environment Variable Verification ==="
+    - MISSING=""
+    - |
+      check_var() {
+        name="$1"
+        value="$2"
+        if [ -z "$value" ]; then
+          echo "MISSING: $name"
+          MISSING="$MISSING $name"
+        else
+          echo "OK: $name = $value"
+        fi
+      }
+    - check_var "JAVA_VERSION"          "$JAVA_VERSION"
+    - check_var "MAVEN_OPTS"            "$MAVEN_OPTS"
+    - check_var "APP_NAME"              "$APP_NAME"
+    - check_var "BUILD_TIMEOUT_MINUTES" "$BUILD_TIMEOUT_MINUTES"
+    - check_var "TEST_TIMEOUT_MINUTES"  "$TEST_TIMEOUT_MINUTES"
+    - |
+      if [ -n "$MISSING" ]; then
+        echo "FAILURE: Missing required variables:$MISSING"
+        exit 1
+      fi
+    - echo "All environment variables verified successfully."
+
+# ═════════════════════════════════════════════════════════════════════════════
+# M8 — Configuration Validation Gate
+# ═════════════════════════════════════════════════════════════════════════════
+configuration-validation:
+  stage: pre-pipeline
+  image: ubuntu:22.04
+  timeout: 2 minutes
+  needs: [environment-verification]
+  script:
+    - echo "=== M8 Configuration Validation Gate ==="
+    - echo "--- Validating pom.xml ---"
+    - |
+      if [ ! -f "pom.xml" ]; then
+        echo "FAILURE: pom.xml not found"
+        exit 1
+      fi
+    - |
+      for element in "groupId" "artifactId" "version" "dependencies" "build"; do
+        if grep -q "<$element>" pom.xml; then
+          echo "OK: <$element> found"
+        else
+          echo "FAILURE: <$element> missing from pom.xml"
+          exit 1
+        fi
+      done
+    - echo "--- Validating application.properties ---"
+    - PROPS="src/main/resources/application.properties"
+    - |
+      if [ ! -f "$PROPS" ]; then
+        echo "FAILURE: application.properties not found"
+        exit 1
+      fi
+    - |
+      for key in "spring.application.name" "server.port" "spring.datasource.url"; do
+        if grep -q "^$key=" "$PROPS"; then
+          echo "OK: $key found"
+        else
+          echo "FAILURE: Required key '$key' missing"
+          exit 1
+        fi
+      done
+    - PORT=$(grep '^server.port=' "$PROPS" | head -1 | cut -d'=' -f2- | tr -d '[:space:]')
+    - |
+      if ! echo "$PORT" | grep -Eq '^[0-9]+$'; then
+        echo "FAILURE: server.port must be numeric, got '$PORT'"
+        exit 1
+      fi
+      if [ "$PORT" -lt 1 ] || [ "$PORT" -gt 65535 ]; then
+        echo "FAILURE: server.port out of range: $PORT"
+        exit 1
+      fi
+    - echo "Configuration validation passed."
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Build — M1, M2, M3, M11
+# ═════════════════════════════════════════════════════════════════════════════
+build:
+  stage: build
+  image: eclipse-temurin:21-jdk
+  timeout: 10 minutes
+  needs: [configuration-validation]
+  retry:
+    max: 3
+    when:
+      - runner_system_failure
+      - stuck_or_timeout_failure
+      - script_failure
+  cache:
+    key:
+      files:
+        - pom.xml
+    paths:
+      - .m2/repository
+    policy: pull-push
+  script:
+    - echo "=== Stage 1: Build ==="
+    - |
+      if [ -d ".m2/repository" ]; then
+        echo "M11: Cache present — using cached dependencies"
+      else
+        echo "M11: Cache absent — downloading fresh dependencies"
+      fi
+    - |
+      mvn compile $MAVEN_CLI_OPTS > build.log 2>&1 || {
+        EXIT_CODE=$?
+        cat build.log
+        exit $EXIT_CODE
+      }
+      cat build.log
+      echo "Build completed successfully."
+  after_script:
+    - |
+      if [ "$CI_JOB_STATUS" = "failed" ]; then
+        echo "=== M3: Build Failure Notification ==="
+        echo "Branch:   $CI_COMMIT_REF_NAME"
+        echo "Commit:   $CI_COMMIT_SHA"
+        echo "Author:   $CI_COMMIT_AUTHOR"
+        echo "Pipeline: $CI_PIPELINE_URL"
+        echo "ACTION REQUIRED: Compilation failed after retries."
+      fi
+  artifacts:
+    name: "build-log-$CI_PIPELINE_IID"
+    when: always
+    expire_in: 30 days
+    paths:
+      - build.log
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Test — M4, M5, M6
+# ═════════════════════════════════════════════════════════════════════════════
+test:
+  stage: test
+  image: eclipse-temurin:21-jdk
+  timeout: 10 minutes
+  needs: [build]
+  retry:
+    max: 3
+    when:
+      - script_failure
+      - runner_system_failure
+      - stuck_or_timeout_failure
+  cache:
+    key:
+      files:
+        - pom.xml
+    paths:
+      - .m2/repository
+    policy: pull-push
+  script:
+    - echo "=== Stage 2: Test ==="
+    - |
+      mvn test $MAVEN_CLI_OPTS > test.log 2>&1 || {
+        EXIT_CODE=$?
+        TIMESTAMP=$(date -u +%H:%M:%S)
+        echo "ATTEMPT_FAILED at $TIMESTAMP (exit_code=$EXIT_CODE)" >> flaky_failure_log.txt
+        if [ -d "target/surefire-reports" ]; then
+          grep -h "FAILED\|ERROR\|RuntimeException\|Simulated transient\|instability\|ApplicationContext\|INVALID_PORT_VALUE\|NumberFormatException" \
+            target/surefire-reports/*.txt 2>/dev/null >> flaky_failure_log.txt || true
+        fi
+        cat test.log
+        exit $EXIT_CODE
+      }
+      cat test.log
+  after_script:
+    - echo "=== M5: Flaky Test Quarantine Analysis ==="
+    - REPORT_DIR="target/surefire-reports"
+    - FLAG_FILE="flaky_failure_log.txt"
+    - |
+      if [ ! -d "$REPORT_DIR" ]; then
+        echo "No Surefire reports found — skipping flakiness analysis"
+      elif [ -f "$FLAG_FILE" ]; then
+        echo "M5: FLAKY TEST DETECTED"
+        cat "$FLAG_FILE"
+        echo "Classification: FLAKY CANDIDATE"
+      else
+        FAILED_REPORTS=$(grep -rl "FAILED\|ERROR" "$REPORT_DIR"/*.txt 2>/dev/null || true)
+        if [ -n "$FAILED_REPORTS" ]; then
+          echo "M5: TEST FAILURES DETECTED (deterministic — not flaky)"
+          echo "$FAILED_REPORTS"
+        else
+          echo "M5: All tests passed — no flaky test candidates detected"
+        fi
+      fi
+    - echo "=== M6: Test Result Trend Analysis ==="
+    - |
+      if [ ! -d "$REPORT_DIR" ]; then
+        echo "No Surefire reports found"
+      else
+        TOTAL=0; FAILED=0; ERRORS=0
+        for file in $REPORT_DIR/*.txt; do
+          [ -f "$file" ] || continue
+          t=$(grep -oE "Tests run: [0-9]+" "$file" 2>/dev/null | head -1 | grep -oE "[0-9]+" || echo 0)
+          f=$(grep -oE "Failures: [0-9]+" "$file" 2>/dev/null | head -1 | grep -oE "[0-9]+" || echo 0)
+          e=$(grep -oE "Errors: [0-9]+" "$file" 2>/dev/null | head -1 | grep -oE "[0-9]+" || echo 0)
+          TOTAL=$((TOTAL + t)); FAILED=$((FAILED + f)); ERRORS=$((ERRORS + e))
+        done
+        PASSED=$((TOTAL - FAILED - ERRORS))
+        echo "Tests run: $TOTAL | Passed: $PASSED | Failed: $FAILED | Errors: $ERRORS"
+        if [ "$FAILED" -gt 0 ] || [ "$ERRORS" -gt 0 ]; then
+          echo "TREND ALERT: Test failures detected."
+        else
+          echo "TREND OK: All tests passed in this run."
+        fi
+      fi
+  artifacts:
+    name: "test-reports-$CI_PIPELINE_IID"
+    when: always
+    expire_in: 30 days
+    paths:
+      - target/surefire-reports/
+      - flaky_failure_log.txt
+      - test.log
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Package — M10, M12
+# ═════════════════════════════════════════════════════════════════════════════
+package:
+  stage: package
+  image: eclipse-temurin:21-jdk
+  timeout: 5 minutes
+  needs:
+    - job: test
+      artifacts: true
+  cache:
+    key:
+      files:
+        - pom.xml
+    paths:
+      - .m2/repository
+    policy: pull-push
+  script:
+    - echo "=== Stage 3: Package ==="
+    - mvn package -DskipTests $MAVEN_CLI_OPTS
+    - |
+      JAR=$(find target -name "*.jar" -not -name "*sources*" | head -1)
+      if [ -z "$JAR" ]; then
+        echo "FAILURE: No JAR artifact found in target/"
+        exit 1
+      fi
+      echo "JAR artifact produced: $JAR"
+      ls -lh "$JAR"
+  artifacts:
+    name: "jar-$CI_PIPELINE_IID"
+    when: always
+    expire_in: 30 days
+    paths:
+      - target/*.jar
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Deploy — M7, M12
+# Only runs on pushes to main.
+# ═════════════════════════════════════════════════════════════════════════════
+deploy:
+  stage: deploy
+  image: eclipse-temurin:21-jdk
+  timeout: 5 minutes
+  needs:
+    - job: package
+      artifacts: true
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'
+    - when: never
+  script:
+    - echo "=== Stage 4: Deploy ==="
+    - JAR=$(find target -name "*.jar" -not -name "*sources*" | head -1)
+    - echo "Deploying artifact: $JAR"
+    - echo "Pipeline: $CI_PIPELINE_IID"
+    - echo "Commit: $CI_COMMIT_SHA"
+    - echo "Deployment successful."
+  after_script:
+    - |
+      if [ "$CI_JOB_STATUS" = "failed" ]; then
+        echo "=== M7: Automated Rollback Initiated ==="
+        echo "Deployment failed. In production this would revert to the last known good state."
+        git log --oneline -5 || true
+      fi
+
+# ═════════════════════════════════════════════════════════════════════════════
+# M13 — ML Failure Classification
+# Runs regardless of prior failures. Consumes build/test logs and status metadata.
+# ═════════════════════════════════════════════════════════════════════════════
+anomaly-detection:
+  stage: post-pipeline
+  image: python:3.11-slim
+  timeout: 5 minutes
+  when: always
+  needs:
+    - job: m14-risk-assessment
+      artifacts: true
+      optional: true
+    - job: build
+      artifacts: true
+      optional: true
+    - job: test
+      artifacts: true
+      optional: true
+    - job: package
+      artifacts: true
+      optional: true
+  script:
+    - echo "=== M13: ML Failure Classification ==="
+    - python -m pip install --upgrade pip -q
+    - pip install -q pandas numpy scikit-learn joblib requests
+    - mkdir -p logs
+    - '[ -f build.log ] && cp build.log logs/build.log || true'
+    - '[ -f test.log ] && cp test.log logs/test.log || true'
+    - '[ -f flaky_failure_log.txt ] && cp flaky_failure_log.txt logs/flaky_failure_log.txt || true'
+    - |
+      python - <<'PY'
+      import json, os
+      status = {
+        "platform": "gitlab",
+        "project_path": os.getenv("CI_PROJECT_PATH"),
+        "project_id": os.getenv("CI_PROJECT_ID"),
+        "pipeline_id": os.getenv("CI_PIPELINE_ID"),
+        "pipeline_iid": os.getenv("CI_PIPELINE_IID"),
+        "pipeline_url": os.getenv("CI_PIPELINE_URL"),
+        "commit": os.getenv("CI_COMMIT_SHA"),
+        "branch": os.getenv("CI_COMMIT_REF_NAME"),
+        "source": os.getenv("CI_PIPELINE_SOURCE"),
+        "current_job_status": os.getenv("CI_JOB_STATUS"),
+      }
+      open("pipeline_status.json", "w", encoding="utf-8").write(json.dumps(status, indent=2))
+      PY
+    - cat pipeline_status.json
+    - |
+      python scripts/m13_predict.py \
+        --status pipeline_status.json \
+        --logs logs \
+        --model-bundle models/m13_model_bundle.pkl \
+        --output m13_classification_report.json
+    - cat m13_classification_report.json
+  artifacts:
+    name: "m13-classification-report-$CI_PIPELINE_IID"
+    when: always
+    expire_in: 30 days
+    paths:
+      - m13_classification_report.json
+      - pipeline_status.json
+      - m14_risk_report.json
+      - logs/
