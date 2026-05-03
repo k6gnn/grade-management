@@ -424,23 +424,7 @@ anomaly-detection:
       [ -f test.log ]             && cp test.log             logs/test.log             || true
       [ -f flaky_failure_log.txt ] && cp flaky_failure_log.txt logs/flaky_failure_log.txt || true
 
-      # FIX: Python heredoc with no leading indentation to avoid IndentationError.
-      python - <<'PY'
-import json, os
-status = {
-  "platform": "gitlab",
-  "project_path": os.getenv("CI_PROJECT_PATH"),
-  "project_id": os.getenv("CI_PROJECT_ID"),
-  "pipeline_id": os.getenv("CI_PIPELINE_ID"),
-  "pipeline_iid": os.getenv("CI_PIPELINE_IID"),
-  "pipeline_url": os.getenv("CI_PIPELINE_URL"),
-  "commit": os.getenv("CI_COMMIT_SHA"),
-  "branch": os.getenv("CI_COMMIT_REF_NAME"),
-  "source": os.getenv("CI_PIPELINE_SOURCE"),
-  "current_job_status": os.getenv("CI_JOB_STATUS"),
-}
-open("pipeline_status.json", "w", encoding="utf-8").write(json.dumps(status, indent=2))
-PY
+      python -c "import json,os; d={'platform':'gitlab','project_path':os.getenv('CI_PROJECT_PATH'),'project_id':os.getenv('CI_PROJECT_ID'),'pipeline_id':os.getenv('CI_PIPELINE_ID'),'pipeline_iid':os.getenv('CI_PIPELINE_IID'),'pipeline_url':os.getenv('CI_PIPELINE_URL'),'commit':os.getenv('CI_COMMIT_SHA'),'branch':os.getenv('CI_COMMIT_REF_NAME'),'source':os.getenv('CI_PIPELINE_SOURCE'),'current_job_status':os.getenv('CI_JOB_STATUS')}; open('pipeline_status.json','w').write(json.dumps(d,indent=2))"
 
       cat pipeline_status.json
 
