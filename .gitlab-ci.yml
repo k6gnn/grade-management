@@ -1,11 +1,11 @@
-# ─────────────────────────────────────────────────────────────────────────────
-# GitLab CI/CD Pipeline with Self-Healing Mechanisms M1–M14
+# -----------------------------------------------------------------------------
+# GitLab CI/CD Pipeline with Self-Healing Mechanisms M1-M14
 # Thesis: Evaluation of Self-Healing Mechanisms in CI/CD Pipelines
 # Student: Kanan Badalov, RTU
 #
 # M14 runs first as a warning-only proactive risk predictor.
 # M13 runs last with when: always as an ML-based post-pipeline failure classifier.
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 variables:
   JAVA_VERSION: "21"
@@ -36,10 +36,10 @@ stages:
       - .m2/repository
     policy: pull-push
 
-# ═════════════════════════════════════════════════════════════════════════════
-# M14 — Proactive Failure Risk Assessment
+# =============================================================================
+# M14 - Proactive Failure Risk Assessment
 # Runs before the normal pipeline. Warning-only: never blocks experiment runs.
-# ═════════════════════════════════════════════════════════════════════════════
+# =============================================================================
 m14-risk-assessment:
   stage: risk-assessment
   image: python:3.11-slim
@@ -53,7 +53,7 @@ m14-risk-assessment:
 
       # Guard: skip prediction if model files are missing (warning-only mode)
       if [ ! -f "scripts/m14_predict.py" ] || [ ! -f "models/m14_model.pkl" ] || [ ! -f "models/m14_config.pkl" ]; then
-        echo "WARNING: M14 model files not found — skipping prediction (warning-only mode)"
+        echo "WARNING: M14 model files not found - skipping prediction (warning-only mode)"
         echo '{"status":"skipped","reason":"model_files_not_found"}' > m14_risk_report.json
         cat m14_risk_report.json
         exit 0
@@ -77,9 +77,9 @@ m14-risk-assessment:
     paths:
       - m14_risk_report.json
 
-# ═════════════════════════════════════════════════════════════════════════════
-# M9 — Environment Variable Verification
-# ═════════════════════════════════════════════════════════════════════════════
+# =============================================================================
+# M9 - Environment Variable Verification
+# =============================================================================
 environment-verification:
   stage: pre-pipeline
   image: ubuntu:22.04
@@ -118,9 +118,9 @@ environment-verification:
 
       echo "All environment variables verified successfully."
 
-# ═════════════════════════════════════════════════════════════════════════════
-# M8 — Configuration Validation Gate
-# ═════════════════════════════════════════════════════════════════════════════
+# =============================================================================
+# M8 - Configuration Validation Gate
+# =============================================================================
 configuration-validation:
   stage: pre-pipeline
   image: ubuntu:22.04
@@ -173,9 +173,9 @@ configuration-validation:
 
       echo "Configuration validation passed."
 
-# ═════════════════════════════════════════════════════════════════════════════
-# Build — M1, M2, M3, M11
-# ═════════════════════════════════════════════════════════════════════════════
+# =============================================================================
+# Build - M1, M2, M3, M11
+# =============================================================================
 build:
   stage: build
   image: eclipse-temurin:21-jdk
@@ -198,9 +198,9 @@ build:
     - |
       echo "=== Stage 1: Build ==="
       if [ -d ".m2/repository" ]; then
-        echo "M11: Cache present — using cached dependencies"
+        echo "M11: Cache present - using cached dependencies"
       else
-        echo "M11: Cache absent — downloading fresh dependencies"
+        echo "M11: Cache absent - downloading fresh dependencies"
       fi
 
       # shellcheck disable=SC2086
@@ -228,9 +228,9 @@ build:
     paths:
       - build.log
 
-# ═════════════════════════════════════════════════════════════════════════════
-# Test — M4, M5, M6
-# ═════════════════════════════════════════════════════════════════════════════
+# =============================================================================
+# Test - M4, M5, M6
+# =============================================================================
 test:
   stage: test
   image: eclipse-temurin:21-jdk
@@ -275,7 +275,7 @@ test:
       FLAG_FILE="flaky_failure_log.txt"
 
       if [ ! -d "$REPORT_DIR" ]; then
-        echo "No Surefire reports found — skipping flakiness analysis"
+        echo "No Surefire reports found - skipping flakiness analysis"
       elif [ -f "$FLAG_FILE" ] && [ -s "$FLAG_FILE" ]; then
         echo "M5: FLAKY TEST DETECTED"
         cat "$FLAG_FILE"
@@ -284,10 +284,10 @@ test:
         # FIX: Use find instead of glob to safely handle zero-match case.
         FAILED_REPORTS=$(find "$REPORT_DIR" -name "*.txt" -exec grep -l "FAILED\|ERROR" {} \; 2>/dev/null || true)
         if [ -n "$FAILED_REPORTS" ]; then
-          echo "M5: TEST FAILURES DETECTED (deterministic — not flaky)"
+          echo "M5: TEST FAILURES DETECTED (deterministic - not flaky)"
           echo "$FAILED_REPORTS"
         else
-          echo "M5: All tests passed — no flaky test candidates detected"
+          echo "M5: All tests passed - no flaky test candidates detected"
         fi
       fi
 
@@ -322,9 +322,9 @@ test:
       - flaky_failure_log.txt
       - test.log
 
-# ═════════════════════════════════════════════════════════════════════════════
-# Package — M10, M12
-# ═════════════════════════════════════════════════════════════════════════════
+# =============================================================================
+# Package - M10, M12
+# =============================================================================
 package:
   stage: package
   image: eclipse-temurin:21-jdk
@@ -359,10 +359,10 @@ package:
     paths:
       - target/*.jar
 
-# ═════════════════════════════════════════════════════════════════════════════
-# Deploy — M7, M12
+# =============================================================================
+# Deploy - M7, M12
 # Only runs on pushes to main.
-# ═════════════════════════════════════════════════════════════════════════════
+# =============================================================================
 deploy:
   stage: deploy
   image: eclipse-temurin:21-jdk
@@ -391,10 +391,10 @@ deploy:
         git log --oneline -5 || true
       fi
 
-# ═════════════════════════════════════════════════════════════════════════════
-# M13 — ML Failure Classification
+# =============================================================================
+# M13 - ML Failure Classification
 # Runs regardless of prior failures. Consumes build/test logs and status metadata.
-# ═════════════════════════════════════════════════════════════════════════════
+# =============================================================================
 anomaly-detection:
   stage: post-pipeline
   image: python:3.11-slim
@@ -430,7 +430,7 @@ anomaly-detection:
 
       # FIX: Guard against missing script/model files with a clear error.
       if [ ! -f "scripts/m13_predict.py" ] || [ ! -f "models/m13_model_bundle.pkl" ]; then
-        echo "WARNING: M13 model files not found — skipping ML classification"
+        echo "WARNING: M13 model files not found - skipping ML classification"
         echo '{"status":"skipped","reason":"model_files_not_found"}' > m13_classification_report.json
         cat m13_classification_report.json
         exit 0
