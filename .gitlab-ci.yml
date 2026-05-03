@@ -47,10 +47,17 @@ m14-risk-assessment:
   allow_failure: true
   script:
     - |
-      set -e
       echo "=== M14: Proactive Failure Risk Assessment ==="
       python -m pip install --upgrade pip -q
       pip install -q numpy scikit-learn joblib requests
+
+      # Guard: skip prediction if model files are missing (warning-only mode)
+      if [ ! -f "scripts/m14_predict.py" ] || [ ! -f "models/m14_model.pkl" ] || [ ! -f "models/m14_config.pkl" ]; then
+        echo "WARNING: M14 model files not found — skipping prediction (warning-only mode)"
+        echo '{"status":"skipped","reason":"model_files_not_found"}' > m14_risk_report.json
+        cat m14_risk_report.json
+        exit 0
+      fi
 
       python scripts/m14_predict.py \
         --platform gitlab \
@@ -80,31 +87,36 @@ environment-verification:
   needs:
     - job: m14-risk-assessment
       optional: true
+  # FIX: All logic in a single `|` block so variables and functions share one shell.
   script:
-    - echo "=== M9 Environment Variable Verification ==="
-    - MISSING=""
     - |
+      echo "=== M9 Environment Variable Verification ==="
+
       check_var() {
         name="$1"
         value="$2"
         if [ -z "$value" ]; then
           echo "MISSING: $name"
-          MISSING="$MISSING $name"
+          return 1
         else
           echo "OK: $name = $value"
+          return 0
         fi
       }
-    - check_var "JAVA_VERSION"          "$JAVA_VERSION"
-    - check_var "MAVEN_OPTS"            "$MAVEN_OPTS"
-    - check_var "APP_NAME"              "$APP_NAME"
-    - check_var "BUILD_TIMEOUT_MINUTES" "$BUILD_TIMEOUT_MINUTES"
-    - check_var "TEST_TIMEOUT_MINUTES"  "$TEST_TIMEOUT_MINUTES"
-    - |
-      if [ -n "$MISSING" ]; then
-        echo "FAILURE: Missing required variables:$MISSING"
+
+      MISSING=0
+      check_var "JAVA_VERSION"          "$JAVA_VERSION"          || MISSING=$((MISSING+1))
+      check_var "MAVEN_OPTS"            "$MAVEN_OPTS"            || MISSING=$((MISSING+1))
+      check_var "APP_NAME"              "$APP_NAME"              || MISSING=$((MISSING+1))
+      check_var "BUILD_TIMEOUT_MINUTES" "$BUILD_TIMEOUT_MINUTES" || MISSING=$((MISSING+1))
+      check_var "TEST_TIMEOUT_MINUTES"  "$TEST_TIMEOUT_MINUTES"  || MISSING=$((MISSING+1))
+
+      if [ "$MISSING" -gt 0 ]; then
+        echo "FAILURE: $MISSING required variable(s) are missing."
         exit 1
       fi
-    - echo "All environment variables verified successfully."
+
+      echo "All environment variables verified successfully."
 
 # ═════════════════════════════════════════════════════════════════════════════
 # M8 — Configuration Validation Gate
@@ -115,14 +127,15 @@ configuration-validation:
   timeout: 2 minutes
   needs: [environment-verification]
   script:
-    - echo "=== M8 Configuration Validation Gate ==="
-    - echo "--- Validating pom.xml ---"
     - |
+      echo "=== M8 Configuration Validation Gate ==="
+
+      echo "--- Validating pom.xml ---"
       if [ ! -f "pom.xml" ]; then
         echo "FAILURE: pom.xml not found"
         exit 1
       fi
-    - |
+
       for element in "groupId" "artifactId" "version" "dependencies" "build"; do
         if grep -q "<$element>" pom.xml; then
           echo "OK: <$element> found"
@@ -131,14 +144,14 @@ configuration-validation:
           exit 1
         fi
       done
-    - echo "--- Validating application.properties ---"
-    - PROPS="src/main/resources/application.properties"
-    - |
+
+      echo "--- Validating application.properties ---"
+      PROPS="src/main/resources/application.properties"
       if [ ! -f "$PROPS" ]; then
         echo "FAILURE: application.properties not found"
         exit 1
       fi
-    - |
+
       for key in "spring.application.name" "server.port" "spring.datasource.url"; do
         if grep -q "^$key=" "$PROPS"; then
           echo "OK: $key found"
@@ -147,8 +160,8 @@ configuration-validation:
           exit 1
         fi
       done
-    - PORT=$(grep '^server.port=' "$PROPS" | head -1 | cut -d'=' -f2- | tr -d '[:space:]')
-    - |
+
+      PORT=$(grep '^server.port=' "$PROPS" | head -1 | cut -d'=' -f2- | tr -d '[:space:]')
       if ! echo "$PORT" | grep -Eq '^[0-9]+$'; then
         echo "FAILURE: server.port must be numeric, got '$PORT'"
         exit 1
@@ -157,7 +170,8 @@ configuration-validation:
         echo "FAILURE: server.port out of range: $PORT"
         exit 1
       fi
-    - echo "Configuration validation passed."
+
+      echo "Configuration validation passed."
 
 # ═════════════════════════════════════════════════════════════════════════════
 # Build — M1, M2, M3, M11
@@ -181,14 +195,15 @@ build:
       - .m2/repository
     policy: pull-push
   script:
-    - 'echo "=== Stage 1: Build ==="'
     - |
+      echo "=== Stage 1: Build ==="
       if [ -d ".m2/repository" ]; then
         echo "M11: Cache present — using cached dependencies"
       else
         echo "M11: Cache absent — downloading fresh dependencies"
       fi
-    - |
+
+      # shellcheck disable=SC2086
       mvn compile $MAVEN_CLI_OPTS > build.log 2>&1 || {
         EXIT_CODE=$?
         cat build.log
@@ -235,8 +250,9 @@ test:
       - .m2/repository
     policy: pull-push
   script:
-    - 'echo "=== Stage 2: Test ==="'
     - |
+      echo "=== Stage 2: Test ==="
+      # shellcheck disable=SC2086
       mvn test $MAVEN_CLI_OPTS > test.log 2>&1 || {
         EXIT_CODE=$?
         TIMESTAMP=$(date -u +%H:%M:%S)
@@ -249,19 +265,24 @@ test:
         exit $EXIT_CODE
       }
       cat test.log
+
+      # FIX: Ensure flaky_failure_log.txt always exists so the artifact upload never fails.
+      touch flaky_failure_log.txt
   after_script:
-    - echo "=== M5: Flaky Test Quarantine Analysis ==="
-    - REPORT_DIR="target/surefire-reports"
-    - FLAG_FILE="flaky_failure_log.txt"
     - |
+      echo "=== M5: Flaky Test Quarantine Analysis ==="
+      REPORT_DIR="target/surefire-reports"
+      FLAG_FILE="flaky_failure_log.txt"
+
       if [ ! -d "$REPORT_DIR" ]; then
         echo "No Surefire reports found — skipping flakiness analysis"
-      elif [ -f "$FLAG_FILE" ]; then
+      elif [ -f "$FLAG_FILE" ] && [ -s "$FLAG_FILE" ]; then
         echo "M5: FLAKY TEST DETECTED"
         cat "$FLAG_FILE"
         echo "Classification: FLAKY CANDIDATE"
       else
-        FAILED_REPORTS=$(grep -rl "FAILED\|ERROR" "$REPORT_DIR"/*.txt 2>/dev/null || true)
+        # FIX: Use find instead of glob to safely handle zero-match case.
+        FAILED_REPORTS=$(find "$REPORT_DIR" -name "*.txt" -exec grep -l "FAILED\|ERROR" {} \; 2>/dev/null || true)
         if [ -n "$FAILED_REPORTS" ]; then
           echo "M5: TEST FAILURES DETECTED (deterministic — not flaky)"
           echo "$FAILED_REPORTS"
@@ -269,19 +290,21 @@ test:
           echo "M5: All tests passed — no flaky test candidates detected"
         fi
       fi
-    - echo "=== M6: Test Result Trend Analysis ==="
-    - |
+
+      echo "=== M6: Test Result Trend Analysis ==="
       if [ ! -d "$REPORT_DIR" ]; then
         echo "No Surefire reports found"
       else
         TOTAL=0; FAILED=0; ERRORS=0
-        for file in $REPORT_DIR/*.txt; do
+        # FIX: Use find + while loop to safely handle zero .txt files.
+        while IFS= read -r file; do
           [ -f "$file" ] || continue
           t=$(grep -oE "Tests run: [0-9]+" "$file" 2>/dev/null | head -1 | grep -oE "[0-9]+" || echo 0)
           f=$(grep -oE "Failures: [0-9]+" "$file" 2>/dev/null | head -1 | grep -oE "[0-9]+" || echo 0)
           e=$(grep -oE "Errors: [0-9]+" "$file" 2>/dev/null | head -1 | grep -oE "[0-9]+" || echo 0)
           TOTAL=$((TOTAL + t)); FAILED=$((FAILED + f)); ERRORS=$((ERRORS + e))
-        done
+        done < <(find "$REPORT_DIR" -name "*.txt" 2>/dev/null)
+
         PASSED=$((TOTAL - FAILED - ERRORS))
         echo "Tests run: $TOTAL | Passed: $PASSED | Failed: $FAILED | Errors: $ERRORS"
         if [ "$FAILED" -gt 0 ] || [ "$ERRORS" -gt 0 ]; then
@@ -317,9 +340,11 @@ package:
       - .m2/repository
     policy: pull-push
   script:
-    - 'echo "=== Stage 3: Package ==="'
-    - mvn package -DskipTests $MAVEN_CLI_OPTS
     - |
+      echo "=== Stage 3: Package ==="
+      # shellcheck disable=SC2086
+      mvn package -DskipTests $MAVEN_CLI_OPTS
+
       JAR=$(find target -name "*.jar" -not -name "*sources*" | head -1)
       if [ -z "$JAR" ]; then
         echo "FAILURE: No JAR artifact found in target/"
@@ -345,16 +370,19 @@ deploy:
   needs:
     - job: package
       artifacts: true
+  # FIX: Replaced bare `when: never` (lint warning) with explicit branch condition.
   rules:
     - if: '$CI_COMMIT_BRANCH == "main"'
+      when: on_success
     - when: never
   script:
-    - 'echo "=== Stage 4: Deploy ==="'
-    - JAR=$(find target -name "*.jar" -not -name "*sources*" | head -1)
-    - 'echo "Deploying artifact: $JAR"'
-    - 'echo "Pipeline: $CI_PIPELINE_IID"'
-    - 'echo "Commit: $CI_COMMIT_SHA"'
-    - echo "Deployment successful."
+    - |
+      echo "=== Stage 4: Deploy ==="
+      JAR=$(find target -name "*.jar" -not -name "*sources*" | head -1)
+      echo "Deploying artifact: $JAR"
+      echo "Pipeline: $CI_PIPELINE_IID"
+      echo "Commit:   $CI_COMMIT_SHA"
+      echo "Deployment successful."
   after_script:
     - |
       if [ "$CI_JOB_STATUS" = "failed" ]; then
@@ -386,38 +414,54 @@ anomaly-detection:
       artifacts: true
       optional: true
   script:
-    - 'echo "=== M13: ML Failure Classification ==="'
-    - python -m pip install --upgrade pip -q
-    - pip install -q pandas numpy scikit-learn joblib requests
-    - mkdir -p logs
-    - '[ -f build.log ] && cp build.log logs/build.log || true'
-    - '[ -f test.log ] && cp test.log logs/test.log || true'
-    - '[ -f flaky_failure_log.txt ] && cp flaky_failure_log.txt logs/flaky_failure_log.txt || true'
     - |
+      echo "=== M13: ML Failure Classification ==="
+      python -m pip install --upgrade pip -q
+      pip install -q pandas numpy scikit-learn joblib requests
+
+      mkdir -p logs
+      [ -f build.log ]            && cp build.log            logs/build.log            || true
+      [ -f test.log ]             && cp test.log             logs/test.log             || true
+      [ -f flaky_failure_log.txt ] && cp flaky_failure_log.txt logs/flaky_failure_log.txt || true
+
+      # FIX: Python heredoc with no leading indentation to avoid IndentationError.
       python - <<'PY'
-      import json, os
-      status = {
-        "platform": "gitlab",
-        "project_path": os.getenv("CI_PROJECT_PATH"),
-        "project_id": os.getenv("CI_PROJECT_ID"),
-        "pipeline_id": os.getenv("CI_PIPELINE_ID"),
-        "pipeline_iid": os.getenv("CI_PIPELINE_IID"),
-        "pipeline_url": os.getenv("CI_PIPELINE_URL"),
-        "commit": os.getenv("CI_COMMIT_SHA"),
-        "branch": os.getenv("CI_COMMIT_REF_NAME"),
-        "source": os.getenv("CI_PIPELINE_SOURCE"),
-        "current_job_status": os.getenv("CI_JOB_STATUS"),
-      }
-      open("pipeline_status.json", "w", encoding="utf-8").write(json.dumps(status, indent=2))
-      PY
-    - cat pipeline_status.json
-    - |
+import json, os
+status = {
+  "platform": "gitlab",
+  "project_path": os.getenv("CI_PROJECT_PATH"),
+  "project_id": os.getenv("CI_PROJECT_ID"),
+  "pipeline_id": os.getenv("CI_PIPELINE_ID"),
+  "pipeline_iid": os.getenv("CI_PIPELINE_IID"),
+  "pipeline_url": os.getenv("CI_PIPELINE_URL"),
+  "commit": os.getenv("CI_COMMIT_SHA"),
+  "branch": os.getenv("CI_COMMIT_REF_NAME"),
+  "source": os.getenv("CI_PIPELINE_SOURCE"),
+  "current_job_status": os.getenv("CI_JOB_STATUS"),
+}
+open("pipeline_status.json", "w", encoding="utf-8").write(json.dumps(status, indent=2))
+PY
+
+      cat pipeline_status.json
+
+      # FIX: Guard against missing script/model files with a clear error.
+      if [ ! -f "scripts/m13_predict.py" ] || [ ! -f "models/m13_model_bundle.pkl" ]; then
+        echo "WARNING: M13 model files not found — skipping ML classification"
+        echo '{"status":"skipped","reason":"model_files_not_found"}' > m13_classification_report.json
+        cat m13_classification_report.json
+        exit 0
+      fi
+
       python scripts/m13_predict.py \
         --status pipeline_status.json \
         --logs logs \
         --model-bundle models/m13_model_bundle.pkl \
         --output m13_classification_report.json
-    - cat m13_classification_report.json
+
+      cat m13_classification_report.json
+
+      # FIX: Ensure m14 report exists for re-upload even if the upstream job was skipped.
+      [ -f m14_risk_report.json ] || echo '{"status":"not_available"}' > m14_risk_report.json
   artifacts:
     name: "m13-classification-report-$CI_PIPELINE_IID"
     when: always
