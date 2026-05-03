@@ -443,49 +443,47 @@ EOF
                         try { unstash 'build-log'     } catch (e) { echo "No build-log stash: ${e.message}" }
                         try { unstash 'test-artifacts'} catch (e) { echo "No test-artifacts stash: ${e.message}" }
 
-                        sh '''
+                        sh """
                             echo "=== M13: ML Failure Classification ==="
                             export HOME=/tmp
                             python -m pip install --upgrade pip -q --user
                             pip install -q pandas numpy scikit-learn joblib requests --user
-                            export PYTHONPATH=$(python -c "import site; print(site.getusersitepackages())")
-                            export PATH="$HOME/.local/bin:$PATH"
+                            export PYTHONPATH=\$(python -c "import site; print(site.getusersitepackages())")
+                            export PATH="\$HOME/.local/bin:\$PATH"
 
                             mkdir -p logs
                             [ -f build.log ]             && cp build.log             logs/build.log             || true
                             [ -f test.log ]              && cp test.log              logs/test.log              || true
                             [ -f flaky_failure_log.txt ] && cp flaky_failure_log.txt logs/flaky_failure_log.txt || true
-                        '''
 
-                        // Write pipeline_status.json using env vars available in Groovy
-                        def pipelineStatus = [
-                            platform          : 'jenkins',
-                            job_name          : env.JOB_NAME,
-                            build_number      : env.BUILD_NUMBER,
-                            build_url         : env.BUILD_URL,
-                            commit            : env.GIT_COMMIT ?: 'unknown',
-                            branch            : env.GIT_BRANCH ?: 'unknown',
-                            current_job_status: currentBuild.currentResult
-                        ]
-                        writeJSON file: 'pipeline_status.json', json: pipelineStatus, pretty: 2
-                        sh 'cat pipeline_status.json'
+                            cat > pipeline_status.json << 'ENDJSON'
+{
+  "platform": "jenkins",
+  "job_name": "${env.JOB_NAME}",
+  "build_number": "${env.BUILD_NUMBER}",
+  "build_url": "${env.BUILD_URL}",
+  "commit": "${env.GIT_COMMIT ?: 'unknown'}",
+  "branch": "${env.GIT_BRANCH ?: 'unknown'}",
+  "current_job_status": "${currentBuild.currentResult}"
+}
+ENDJSON
+                            cat pipeline_status.json
 
-                        sh '''
                             if [ ! -f "scripts/m13_predict.py" ] || [ ! -f "models/m13_model_bundle.pkl" ]; then
                                 echo "WARNING: M13 model files not found - skipping ML classification"
-                                echo \'{"status":"skipped","reason":"model_files_not_found"}\' > m13_classification_report.json
+                                echo '{"status":"skipped","reason":"model_files_not_found"}' > m13_classification_report.json
                                 cat m13_classification_report.json
                             else
-                                python scripts/m13_predict.py \
-                                    --status pipeline_status.json \
-                                    --logs   logs \
-                                    --model-bundle models/m13_model_bundle.pkl \
+                                python scripts/m13_predict.py \\
+                                    --status pipeline_status.json \\
+                                    --logs   logs \\
+                                    --model-bundle models/m13_model_bundle.pkl \\
                                     --output m13_classification_report.json
                                 cat m13_classification_report.json
                             fi
 
-                            [ -f m14_risk_report.json ] || echo \'{"status":"not_available"}\' > m14_risk_report.json
-                        '''
+                            [ -f m14_risk_report.json ] || echo '{"status":"not_available"}' > m14_risk_report.json
+                        """
 
                         archiveArtifacts artifacts: '''
                             m13_classification_report.json,
@@ -493,7 +491,8 @@ EOF
                             m14_risk_report.json,
                             logs/**
                         ''', allowEmptyArchive: true
-                    }   // end docker.image().inside
+                        }   // end docker.image().inside
+                    }
                 }
             }
         }
