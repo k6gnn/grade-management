@@ -178,7 +178,7 @@ configuration-validation:
 # =============================================================================
 build:
   stage: build
-  image: eclipse-temurin:21-jdk
+  image: maven:3.9-eclipse-temurin-21
   timeout: 10 minutes
   needs: [configuration-validation]
   retry:
@@ -233,7 +233,7 @@ build:
 # =============================================================================
 test:
   stage: test
-  image: eclipse-temurin:21-jdk
+  image: maven:3.9-eclipse-temurin-21
   timeout: 10 minutes
   needs: [build]
   retry:
@@ -327,7 +327,7 @@ test:
 # =============================================================================
 package:
   stage: package
-  image: eclipse-temurin:21-jdk
+  image: maven:3.9-eclipse-temurin-21
   timeout: 5 minutes
   needs:
     - job: test
@@ -365,7 +365,7 @@ package:
 # =============================================================================
 deploy:
   stage: deploy
-  image: eclipse-temurin:21-jdk
+  image: maven:3.9-eclipse-temurin-21
   timeout: 5 minutes
   needs:
     - job: package
