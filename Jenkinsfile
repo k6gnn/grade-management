@@ -53,10 +53,10 @@ pipeline {
                         sh '''
                             echo "=== M14: Proactive Failure Risk Assessment ==="
                             export HOME=/tmp
+                            python -m pip install --upgrade pip -q --user
+                            pip install -q numpy scikit-learn joblib requests --user
+                            export PYTHONPATH=$(python -c "import site; print(site.getusersitepackages())")
                             export PATH="$HOME/.local/bin:$PATH"
-                            export PYTHONPATH="$HOME/.local/lib/python3.11/site-packages:$PYTHONPATH"
-                            python -m pip install --upgrade pip -q
-                            pip install -q numpy scikit-learn joblib requests
 
                             if [ ! -f "scripts/m14_predict.py" ] || \
                                [ ! -f "models/m14_model.pkl" ]   || \
@@ -446,10 +446,10 @@ EOF
                         sh '''
                             echo "=== M13: ML Failure Classification ==="
                             export HOME=/tmp
+                            python -m pip install --upgrade pip -q --user
+                            pip install -q pandas numpy scikit-learn joblib requests --user
+                            export PYTHONPATH=$(python -c "import site; print(site.getusersitepackages())")
                             export PATH="$HOME/.local/bin:$PATH"
-                            export PYTHONPATH="$HOME/.local/lib/python3.11/site-packages:$PYTHONPATH"
-                            python -m pip install --upgrade pip -q
-                            pip install -q pandas numpy scikit-learn joblib requests
 
                             mkdir -p logs
                             [ -f build.log ]             && cp build.log             logs/build.log             || true
