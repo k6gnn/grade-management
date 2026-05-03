@@ -13,7 +13,7 @@ variables:
   APP_NAME: "grade-management"
   BUILD_TIMEOUT_MINUTES: "10"
   TEST_TIMEOUT_MINUTES: "10"
-  MAX_RETRIES: "3"
+  MAX_RETRIES: "2"
   MAVEN_CLI_OPTS: "-B --no-transfer-progress"
   M14_THRESHOLD_MODE: "balanced"
   M14_MODE: "warning_only"
@@ -168,7 +168,7 @@ build:
   timeout: 10 minutes
   needs: [configuration-validation]
   retry:
-    max: 3
+    max: 2
     when:
       - runner_system_failure
       - stuck_or_timeout_failure
@@ -222,7 +222,7 @@ test:
   timeout: 10 minutes
   needs: [build]
   retry:
-    max: 3
+    max: 2
     when:
       - script_failure
       - runner_system_failure
