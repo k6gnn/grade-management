@@ -428,13 +428,12 @@ pipeline {
     // POST (always)  -  M13: ML Failure Classification
     // Runs after all stages regardless of pipeline outcome.
     // =========================================================================
-    post {
-        always {
-            node('built-in') {
-                // Use python via docker for the post step
-                docker.image('python:3.11-slim').inside {
+     post {
+            always {
+                node('built-in') {
                     script {
-                        // Unstash any artifacts produced by earlier stages
+                        // Use python via docker for the post step
+                        docker.image('python:3.11-slim').inside {
                         try { unstash 'm14-report'    } catch (e) { echo "No M14 report stash: ${e.message}" }
                         try { unstash 'build-log'     } catch (e) { echo "No build-log stash: ${e.message}" }
                         try { unstash 'test-artifacts'} catch (e) { echo "No test-artifacts stash: ${e.message}" }
