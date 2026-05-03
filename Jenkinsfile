@@ -52,8 +52,8 @@ pipeline {
                     try {
                         sh '''
                             echo "=== M14: Proactive Failure Risk Assessment ==="
-                            python -m pip install --upgrade pip -q
-                            pip install -q numpy scikit-learn joblib requests
+                            HOME=/tmp python -m pip install --upgrade pip -q
+                            HOME=/tmp pip install -q numpy scikit-learn joblib requests
 
                             if [ ! -f "scripts/m14_predict.py" ] || \
                                [ ! -f "models/m14_model.pkl" ]   || \
@@ -324,7 +324,9 @@ pipeline {
                                 TOTAL=$((TOTAL + t))
                                 FAILED=$((FAILED + f))
                                 ERRORS=$((ERRORS + e))
-                            done < <(find "$REPORT_DIR" -name "*.txt" 2>/dev/null)
+                            done << EOF
+$(find "$REPORT_DIR" -name "*.txt" 2>/dev/null)
+EOF
 
                             PASSED=$((TOTAL - FAILED - ERRORS))
                             echo "Tests run: $TOTAL | Passed: $PASSED | Failed: $FAILED | Errors: $ERRORS"
@@ -440,8 +442,8 @@ pipeline {
 
                         sh '''
                             echo "=== M13: ML Failure Classification ==="
-                            python -m pip install --upgrade pip -q
-                            pip install -q pandas numpy scikit-learn joblib requests
+                            HOME=/tmp python -m pip install --upgrade pip -q
+                            HOME=/tmp pip install -q pandas numpy scikit-learn joblib requests
 
                             mkdir -p logs
                             [ -f build.log ]             && cp build.log             logs/build.log             || true
@@ -485,7 +487,7 @@ pipeline {
                             m14_risk_report.json,
                             logs/**
                         ''', allowEmptyArchive: true
-                    }
+                    }   // end docker.image().inside
                 }
             }
         }
