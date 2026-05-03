@@ -46,23 +46,23 @@ m14-risk-assessment:
   timeout: 5 minutes
   allow_failure: true
   script:
-    - echo "=== M14: Proactive Failure Risk Assessment ==="
-    - python -m pip install --upgrade pip -q
-    - pip install -q pandas numpy scikit-learn joblib requests
     - |
+      set -e
+      echo "=== M14: Proactive Failure Risk Assessment ==="
+      python -m pip install --upgrade pip -q
+      pip install -q numpy scikit-learn joblib requests
+
       python scripts/m14_predict.py \
         --platform gitlab \
         --repository "$CI_PROJECT_PATH" \
         --commit "$CI_COMMIT_SHA" \
         --branch "$CI_COMMIT_REF_NAME" \
         --event "$CI_PIPELINE_SOURCE" \
-        --workflow "gitlab-pipeline" \
         --model models/m14_model.pkl \
         --config models/m14_config.pkl \
-        --threshold-mode "$M14_THRESHOLD_MODE" \
-        --mode "$M14_MODE" \
         --output m14_risk_report.json
-    - cat m14_risk_report.json
+
+      cat m14_risk_report.json
   artifacts:
     name: "m14-risk-report-$CI_PIPELINE_IID"
     when: always
@@ -181,7 +181,7 @@ build:
       - .m2/repository
     policy: pull-push
   script:
-    - echo "=== Stage 1: Build ==="
+    - 'echo "=== Stage 1: Build ==="'
     - |
       if [ -d ".m2/repository" ]; then
         echo "M11: Cache present — using cached dependencies"
@@ -235,7 +235,7 @@ test:
       - .m2/repository
     policy: pull-push
   script:
-    - echo "=== Stage 2: Test ==="
+    - 'echo "=== Stage 2: Test ==="'
     - |
       mvn test $MAVEN_CLI_OPTS > test.log 2>&1 || {
         EXIT_CODE=$?
@@ -317,7 +317,7 @@ package:
       - .m2/repository
     policy: pull-push
   script:
-    - echo "=== Stage 3: Package ==="
+    - 'echo "=== Stage 3: Package ==="'
     - mvn package -DskipTests $MAVEN_CLI_OPTS
     - |
       JAR=$(find target -name "*.jar" -not -name "*sources*" | head -1)
@@ -349,11 +349,11 @@ deploy:
     - if: '$CI_COMMIT_BRANCH == "main"'
     - when: never
   script:
-    - echo "=== Stage 4: Deploy ==="
+    - 'echo "=== Stage 4: Deploy ==="'
     - JAR=$(find target -name "*.jar" -not -name "*sources*" | head -1)
-    - echo "Deploying artifact: $JAR"
-    - echo "Pipeline: $CI_PIPELINE_IID"
-    - echo "Commit: $CI_COMMIT_SHA"
+    - 'echo "Deploying artifact: $JAR"'
+    - 'echo "Pipeline: $CI_PIPELINE_IID"'
+    - 'echo "Commit: $CI_COMMIT_SHA"'
     - echo "Deployment successful."
   after_script:
     - |
@@ -386,7 +386,7 @@ anomaly-detection:
       artifacts: true
       optional: true
   script:
-    - echo "=== M13: ML Failure Classification ==="
+    - 'echo "=== M13: ML Failure Classification ==="'
     - python -m pip install --upgrade pip -q
     - pip install -q pandas numpy scikit-learn joblib requests
     - mkdir -p logs
