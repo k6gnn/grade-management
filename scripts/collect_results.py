@@ -56,6 +56,21 @@ import argparse
 from pathlib import Path
 from datetime import datetime, timezone
 
+# ─── Load .env file if present ────────────────────────────────────────────────
+_env_path = Path(__file__).parent.parent / ".env"
+if not _env_path.exists():
+    _env_path = Path(__file__).parent / ".env"
+if not _env_path.exists():
+    _env_path = Path(".env")
+if _env_path.exists():
+    with open(_env_path) as _f:
+        for _line in _f:
+            _line = _line.strip()
+            if _line and not _line.startswith("#") and "=" in _line:
+                _key, _val = _line.split("=", 1)
+                os.environ.setdefault(_key.strip(), _val.strip())
+    print(f"  Loaded environment from {_env_path}")
+
 # ─── Configuration ────────────────────────────────────────────────────────────
 
 GITHUB_OWNER   = "k6gnn"
@@ -66,7 +81,7 @@ GITLAB_PROJECT = "grade-management"          # adjust if your GitLab project nam
 
 JENKINS_URL    = "http://localhost:8081"
 JENKINS_USER   = "k6gnn"
-JENKINS_JOB    = "grade-management"
+JENKINS_JOB    = "Thesis-Project"
 
 OUTPUT_ROOT    = Path("experiment_results")
 
