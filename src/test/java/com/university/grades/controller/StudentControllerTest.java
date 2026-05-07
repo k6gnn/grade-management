@@ -32,16 +32,6 @@ class StudentControllerTest {
 
     @Test
     void getAllStudents_shouldReturn200WithStudentList() throws Exception {
-        // INJECTED: Stateful marker-file flakiness (Experiment 3)
-        java.io.File _flaky_marker = new java.io.File(
-                System.getProperty("java.io.tmpdir"), "flaky_marker.tmp");
-        if (!_flaky_marker.exists()) {
-            try { _flaky_marker.createNewFile(); } catch (java.io.IOException _ignored) {}
-            throw new RuntimeException(
-                "Simulated transient failure: cold-start instability detected");
-        }
-        // END INJECTED
-
         Student s1 = new Student("Alice", 8.5);
         s1.setId(1L);
         Student s2 = new Student("Bob", 6.0);
