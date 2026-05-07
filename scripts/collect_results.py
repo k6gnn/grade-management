@@ -114,7 +114,7 @@ def save_text(path: Path, text: str):
 # GITHUB ACTIONS COLLECTOR
 # ═════════════════════════════════════════════════════════════════════════════
 
-def collect_github(experiment_id: str, run_number: int, injection_type: str):
+def collect_github(experiment_id: str, run_number: int, injection_type: str, commit_sha: str = None):
     print(f"\n[GITHUB] Collecting {experiment_id} run {run_number}...")
     token = get_token("GITHUB_TOKEN")
     headers = {
@@ -125,12 +125,12 @@ def collect_github(experiment_id: str, run_number: int, injection_type: str):
     base = f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}"
     out  = run_dir(experiment_id, "github", run_number)
 
-    # ── Get the most recent workflow run ──────────────────────────────────────
-    resp = requests.get(
-        f"{base}/actions/runs",
-        headers=headers,
-        params={"branch": "main", "per_page": 5}
-    )
+    # ── Get the run for the specific inject commit ────────────────────────────
+    params = {"branch": "main", "per_page": 10}
+    if commit_sha:
+        params["head_sha"] = commit_sha
+        print(f"  Filtering by commit SHA: {commit_sha[:12]}...")
+    resp = requests.get(f"{base}/actions/runs", headers=headers, params=params)
     resp.raise_for_status()
     runs = resp.json().get("workflow_runs", [])
     if not runs:
@@ -240,22 +240,21 @@ def collect_github(experiment_id: str, run_number: int, injection_type: str):
     return out, metadata
 # ═════════════════════════════════════════════════════════════════════════════
 
-def collect_gitlab(experiment_id: str, run_number: int, injection_type: str):
+def collect_gitlab(experiment_id: str, run_number: int, injection_type: str, commit_sha: str = None):
     print(f"\n[GITLAB] Collecting {experiment_id} run {run_number}...")
     token = get_token("GITLAB_TOKEN")
     headers = {"PRIVATE-TOKEN": token}
     out = run_dir(experiment_id, "gitlab", run_number)
 
-    # Resolve numeric project ID from namespace/project slug
     encoded_path = f"{GITLAB_USER}%2F{GITLAB_PROJECT}"
     base = f"https://gitlab.com/api/v4/projects/{encoded_path}"
 
-    # ── Get the most recent pipeline ─────────────────────────────────────────
-    resp = requests.get(
-        f"{base}/pipelines",
-        headers=headers,
-        params={"ref": "main", "per_page": 5, "order_by": "id", "sort": "desc"}
-    )
+    # ── Get the pipeline for the specific inject commit ───────────────────────
+    params = {"ref": "main", "per_page": 10, "order_by": "id", "sort": "desc"}
+    if commit_sha:
+        params["sha"] = commit_sha
+        print(f"  Filtering by commit SHA: {commit_sha[:12]}...")
+    resp = requests.get(f"{base}/pipelines", headers=headers, params=params)
     resp.raise_for_status()
     pipelines = resp.json()
 
@@ -360,7 +359,7 @@ def collect_gitlab(experiment_id: str, run_number: int, injection_type: str):
 # JENKINS COLLECTOR
 # ═════════════════════════════════════════════════════════════════════════════
 
-def collect_jenkins(experiment_id: str, run_number: int, injection_type: str):
+def collect_jenkins(experiment_id: str, run_number: int, injection_type: str, commit_sha: str = None):
     print(f"\n[JENKINS] Collecting {experiment_id} run {run_number}...")
     token = get_token("JENKINS_TOKEN")
     auth  = (JENKINS_USER, token)
@@ -527,8 +526,8 @@ def append_to_csv(metadata: dict, out: Path = None):
 # WAIT FOR PIPELINE — polls until complete before collecting
 # ═════════════════════════════════════════════════════════════════════════════
 
-def wait_for_github(timeout_seconds: int = 600) -> bool:
-    """Polls GitHub until the latest run is no longer in_progress/queued."""
+def wait_for_github(timeout_seconds: int = 600, commit_sha: str = None) -> bool:
+    """Polls GitHub until the run for the specific commit SHA is complete."""
     token   = get_token("GITHUB_TOKEN")
     headers = {
         "Authorization": f"Bearer {token}",
@@ -539,11 +538,16 @@ def wait_for_github(timeout_seconds: int = 600) -> bool:
     print("  Waiting for GitHub Actions pipeline to complete", end="", flush=True)
     deadline = time.time() + timeout_seconds
     while time.time() < deadline:
-        resp = requests.get(f"{base}/actions/runs", headers=headers, params={"per_page": 1})
+        params = {"branch": "main", "per_page": 10}
+        if commit_sha:
+            params["head_sha"] = commit_sha
+        resp = requests.get(f"{base}/actions/runs", headers=headers, params=params)
         resp.raise_for_status()
         runs = resp.json().get("workflow_runs", [])
         if runs:
-            status = runs[0].get("status")
+            # If filtering by SHA, use first match; otherwise use latest
+            run = runs[0]
+            status = run.get("status")
             if status not in ("in_progress", "queued", "waiting", "requested"):
                 print(f" done ({status})")
                 return True
@@ -552,8 +556,8 @@ def wait_for_github(timeout_seconds: int = 600) -> bool:
     print(" TIMEOUT")
     return False
 
-def wait_for_gitlab(timeout_seconds: int = 600) -> bool:
-    """Polls GitLab until the latest pipeline is no longer running."""
+def wait_for_gitlab(timeout_seconds: int = 600, commit_sha: str = None) -> bool:
+    """Polls GitLab until the pipeline for the specific commit SHA is complete."""
     token   = get_token("GITLAB_TOKEN")
     headers = {"PRIVATE-TOKEN": token}
     encoded = f"{GITLAB_USER}%2F{GITLAB_PROJECT}"
@@ -561,8 +565,10 @@ def wait_for_gitlab(timeout_seconds: int = 600) -> bool:
     print("  Waiting for GitLab pipeline to complete", end="", flush=True)
     deadline = time.time() + timeout_seconds
     while time.time() < deadline:
-        resp = requests.get(f"{base}/pipelines", headers=headers,
-                            params={"ref": "main", "per_page": 1})
+        params = {"ref": "main", "per_page": 10, "order_by": "id", "sort": "desc"}
+        if commit_sha:
+            params["sha"] = commit_sha
+        resp = requests.get(f"{base}/pipelines", headers=headers, params=params)
         resp.raise_for_status()
         pipelines = resp.json()
         if pipelines:
@@ -575,18 +581,35 @@ def wait_for_gitlab(timeout_seconds: int = 600) -> bool:
     print(" TIMEOUT")
     return False
 
-def wait_for_jenkins(timeout_seconds: int = 600) -> bool:
-    """Polls Jenkins until the latest build is no longer building."""
+def wait_for_jenkins(timeout_seconds: int = 600, commit_sha: str = None) -> bool:
+    """Polls Jenkins until the build for the specific commit SHA is complete."""
     token    = get_token("JENKINS_TOKEN")
     auth     = (JENKINS_USER, token)
     job_base = f"{JENKINS_URL}/job/{JENKINS_JOB}"
     print("  Waiting for Jenkins build to complete", end="", flush=True)
     deadline = time.time() + timeout_seconds
+    # Give Jenkins a few seconds to pick up the webhook before polling
+    time.sleep(10)
     while time.time() < deadline:
         try:
             resp = requests.get(f"{job_base}/lastBuild/api/json", auth=auth, timeout=10)
             resp.raise_for_status()
             build = resp.json()
+            # Match by commit SHA if provided
+            if commit_sha:
+                actions = build.get("actions", [])
+                build_sha = ""
+                for action in actions:
+                    if isinstance(action, dict):
+                        for revision in action.get("buildsByBranchName", {}).values():
+                            build_sha = revision.get("revision", {}).get("SHA1", "")
+                        if not build_sha:
+                            build_sha = action.get("lastBuiltRevision", {}).get("SHA1", "")
+                if build_sha and not build_sha.startswith(commit_sha[:8]):
+                    # This build is for a different commit — keep waiting
+                    print(".", end="", flush=True)
+                    time.sleep(15)
+                    continue
             if not build.get("building", False):
                 print(f" done ({build.get('result', 'UNKNOWN')})")
                 return True
@@ -610,11 +633,13 @@ COLLECTORS = {
 def main():
     parser = argparse.ArgumentParser(description="Collect CI/CD experiment results")
     parser.add_argument("experiment_id",  help="e.g. E1, E2, E5b, E13")
-    parser.add_argument("run_number",     type=int, help="Run number (1-10)")
+    parser.add_argument("run_number",     type=int, help="Run number (1-5)")
     parser.add_argument("platform",       help="github | gitlab | jenkins | all")
     parser.add_argument("injection_type", help="e.g. compilation, test, flaky")
     parser.add_argument("--no-wait",      action="store_true",
                         help="Skip waiting for pipeline — collect immediately")
+    parser.add_argument("--commit",       default=None,
+                        help="Commit SHA of the inject commit (recommended — prevents collecting wrong run)")
     args = parser.parse_args()
 
     platforms = list(COLLECTORS.keys()) if args.platform == "all" else [args.platform]
@@ -627,11 +652,11 @@ def main():
         wait_fn, collect_fn = COLLECTORS[platform]
 
         if not args.no_wait:
-            ok = wait_fn()
+            ok = wait_fn(commit_sha=args.commit)
             if not ok:
                 print(f"WARNING: Pipeline did not complete within timeout for {platform}. Collecting anyway.")
 
-        result = collect_fn(args.experiment_id, args.run_number, args.injection_type)
+        result = collect_fn(args.experiment_id, args.run_number, args.injection_type, commit_sha=args.commit)
         if result:
             out, metadata = result
             append_to_csv(metadata, out)

@@ -57,10 +57,14 @@ if ($Platform -eq "github") {
     exit 1
 }
 
+# Capture the inject commit SHA immediately after push
+$InjectSHA = (git rev-parse HEAD).Trim()
+Write-Host "  Inject commit SHA: $InjectSHA"
+
 # Step 4: Collect results
 Write-Host ""
 Write-Host "[4/6] Waiting for pipeline and collecting results..."
-python $COLLECT_SCRIPT $ExperimentId $RunNumber $Platform $InjectionType
+python $COLLECT_SCRIPT $ExperimentId $RunNumber $Platform $InjectionType --commit $InjectSHA
 if ($LASTEXITCODE -ne 0) {
     Write-Host "WARNING: Collection had errors - check output above."
 }
