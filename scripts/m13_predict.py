@@ -538,9 +538,22 @@ def infer_failing_step(status: dict, log_text: str) -> str:
 
 
 def is_pipeline_failed(status: dict) -> bool:
-    """Return True if any stage reported a failure."""
+    """Return True if any stage reported a failure.
+    Handles status strings from all three platforms:
+      GitHub Actions : 'failure', 'timed_out', 'cancelled'
+      GitLab         : 'failed', 'canceled'
+      Jenkins        : 'FAILURE', 'UNSTABLE', 'ABORTED'
+    Also checks the top-level pipeline_failed flag.
+    """
+    # Check top-level flag first (set by fetch_gitlab_status.py for GitLab)
+    if status.get("pipeline_failed") is True:
+        return True
+    # Check individual stage statuses — case-insensitive to cover all platforms
+    failed_values = {"failure", "failed", "timed_out", "cancelled", "canceled",
+                     "unstable", "aborted"}
     for key in ("config_status", "build_status", "test_status", "package_status"):
-        if status.get(key, "success") in ("failure", "timed_out", "cancelled"):
+        val = status.get(key, "success")
+        if str(val).lower() in failed_values:
             return True
     return False
 
