@@ -35,21 +35,26 @@ try:
 
     # Map stage names to status keys M13 understands
     stage_mapping = {
-        "build":                  "build_status",
-        "stage 1":                "build_status",
-        "stage 1 - build":        "build_status",
-        "test":                   "test_status",
-        "stage 2":                "test_status",
-        "stage 2 - test":         "test_status",
-        "package":                "package_status",
-        "stage 3":                "package_status",
-        "stage 3 - package":      "package_status",
-        "pre-pipeline":           "config_status",
-        "m8 - configuration validation": "config_status",
-        "m9 - environment verification": "config_status",
-        "deploy":                 "deploy_status",
-        "stage 4":                "deploy_status",
-        "stage 4 - deploy":       "deploy_status",
+        "build":                           "build_status",
+        "stage 1":                         "build_status",
+        "stage 1 - build":                 "build_status",
+        "test":                            "test_status",
+        "stage 2":                         "test_status",
+        "stage 2 - test":                  "test_status",
+        "package":                         "package_status",
+        "stage 3":                         "package_status",
+        "stage 3 - package":               "package_status",
+        "pre-pipeline":                    "config_status",
+        "m8 - configuration validation":   "config_status",
+        "m9 - environment verification":   "config_status",
+        "configuration validation":        "config_status",
+        "environment verification":        "config_status",
+        "m8":                              "config_status",
+        "m9":                              "config_status",
+        "deploy":                          "deploy_status",
+        "stage 4":                         "deploy_status",
+        "stage 4 - deploy":                "deploy_status",
+        "m14 - risk assessment":           "m14_status",
     }
 
     for stage in data.get("stages", []):
@@ -57,27 +62,55 @@ try:
         status = stage.get("status", "UNKNOWN")
 
         # Normalize Jenkins status to lowercase
-        # Jenkins uses: SUCCESS, FAILED, UNSTABLE, ABORTED, NOT_EXECUTED
         normalized = status.lower()
         if normalized == "success":
             normalized = "success"
         elif normalized in ("failed", "failure"):
             normalized = "failed"
         elif normalized == "unstable":
-            normalized = "failed"  # treat unstable as failed for M13
+            normalized = "failed"
         elif normalized == "aborted":
             normalized = "canceled"
-        elif normalized == "not_executed":
+        elif normalized in ("not_executed", "skipped"):
             normalized = "skipped"
 
         key = stage_mapping.get(name)
         if key:
-            job_statuses[key] = normalized
+            # For config_status: only update if not already set to failed
+            # (nested stages — take the worst status)
+            existing = job_statuses.get(key)
+            if existing != "failed":
+                job_statuses[key] = normalized
             print(f"  Stage '{name}' -> {key} = {normalized}")
         else:
             print(f"  Stage '{name}' -> no mapping (status: {normalized})")
 
+        # Also check nested stages (stageFlowNodes)
+        for nested in stage.get("stageFlowNodes", []):
+            nested_name = nested.get("name", "").lower().strip()
+            nested_status = nested.get("status", "UNKNOWN").lower()
+            if nested_status in ("failed", "failure"):
+                nested_status = "failed"
+            nested_key = stage_mapping.get(nested_name)
+            if nested_key and nested_status == "failed":
+                job_statuses[nested_key] = "failed"
+                print(f"  Nested stage '{nested_name}' -> {nested_key} = failed")
+
     print("Fetched stage statuses:", job_statuses)
+
+    # Post-processing: if build failed but config_validation.log exists,
+    # it means the Pre-Pipeline stage failed (config), not the Build stage.
+    # Jenkins wfapi sometimes reports nested stage failures under the parent.
+    if (job_statuses.get("build_status") == "failed"
+            and "config_status" not in job_statuses
+            and os.path.exists("config_validation.log")):
+        with open("config_validation.log") as f:
+            config_log = f.read()
+        if "FAILURE" in config_log or "failed" in config_log.lower():
+            print("  Post-processing: config_validation.log contains failures")
+            print("  Reclassifying build_status=failed -> config_status=failed")
+            job_statuses["config_status"] = "failed"
+            job_statuses["build_status"]  = "skipped"
 
 except Exception as e:
     print(f"WARNING: Could not fetch stage statuses via Jenkins API: {e}")
