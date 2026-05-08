@@ -751,7 +751,33 @@ def main() -> None:
         model_used     = "heuristic_fallback"
         log.info("  Heuristic fallback (no model): %s", classification)
 
-    # ── Build report ──────────────────────────────────────────────────────────
+    # ── Stage-based configuration override ───────────────────────────────────
+    # When the config stage fails and build/test/package are all skipped,
+    # AND strong configuration signals are present, override to configuration.
+    # This handles the M8 gate pattern where the pipeline stops at pre-pipeline
+    # validation before any Java compilation or testing occurs.
+    feat_map = dict(zip(FEATURE_NAMES, feats))
+    config_signals_active = (
+        feat_map.get("feat_kw_config_fail", 0) > 0
+        or feat_map.get("feat_config_yaml_workflow", 0) > 0
+        or feat_map.get("feat_config_secret_env", 0) > 0
+        or feat_map.get("feat_config_missing_file", 0) > 0
+    )
+    config_stage_only = (
+        status.get("config_status", "success") in ("failure", "failed", "FAILURE")
+        and status.get("build_status", "success") in ("skipped", "unknown", "")
+        and status.get("test_status", "success") in ("skipped", "unknown", "")
+    )
+    if config_stage_only and config_signals_active and classification != "configuration":
+        log.info(
+            "  Stage override: config_stage_only=True + config_signals_active=True "
+            "-> overriding '%s' to 'configuration'", classification
+        )
+        classification = "configuration"
+        confidence     = max(confidence, 0.75)
+        probabilities["configuration"] = confidence
+        guardrail_applied = True
+        model_used = model_used + "+stage_override"
     report = {
         "classification":  classification,
         "confidence":      round(confidence, 4),
