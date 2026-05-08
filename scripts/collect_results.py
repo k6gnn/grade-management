@@ -76,7 +76,7 @@ if _env_path.exists():
 GITHUB_OWNER   = "k6gnn"
 GITHUB_REPO    = "grade-management"
 
-GITLAB_USER    = "k6gnn"
+GITLAB_USER    = "kananbadalov6"
 GITLAB_PROJECT = "grade-management"          # adjust if your GitLab project name differs
 
 JENKINS_URL    = "http://localhost:8081"
