@@ -22,7 +22,6 @@ public class StudentController {
     // GET /students — returns all students
     @GetMapping
     public ResponseEntity<List<Student>> getAllStudents() {
-        String broken = "unclosed string;
         List<Student> students = studentService.getAllStudents();
         return ResponseEntity.ok(students);
     }
