@@ -164,18 +164,18 @@ jobs:
 
       - name: Validate pom.xml structure
         run: |
-          echo "=== Validating pom.xml ===" | tee -a config_validation.log
+          echo "=== Validating pom.xml ==="
           if [ ! -f "pom.xml" ]; then
-            echo "FAILURE: pom.xml not found at repository root" | tee -a config_validation.log
+            echo "FAILURE: pom.xml not found at repository root"
             exit 1
           fi
 
           # Check required pom.xml elements
           for element in "groupId" "artifactId" "version" "dependencies" "build"; do
             if grep -q "<$element>" pom.xml; then
-              echo "OK: <$element> found in pom.xml" | tee -a config_validation.log
+              echo "OK: <$element> found in pom.xml"
             else
-              echo "FAILURE: <$element> missing from pom.xml" | tee -a config_validation.log
+              echo "FAILURE: <$element> missing from pom.xml"
               exit 1
             fi
           done
@@ -202,23 +202,34 @@ jobs:
           PORT=$(grep '^server.port=' "$PROPS" | head -1 | cut -d'=' -f2- | tr -d '[:space:]')
           if ! [[ "$PORT" =~ ^[0-9]+$ ]]; then
             echo "FAILURE: server.port must be numeric, got '$PORT'" | tee -a config_validation.log
+            # Emit Spring Boot-style error so M13 keyword patterns fire
+            echo "APPLICATION FAILED TO START" | tee -a config_validation.log
+            echo "Failed to bind properties under 'server.port' to int" | tee -a config_validation.log
+            echo "org.springframework.boot.context.properties.bind.BindException: Failed to bind properties under 'server.port'" | tee -a config_validation.log
+            echo "Caused by: java.lang.IllegalArgumentException: Invalid value '$PORT' for server.port — must be a valid integer" | tee -a config_validation.log
+            echo "Configuration property 'server.port' value '$PORT' is not valid" | tee -a config_validation.log
             exit 1
           fi
 
           if [ "$PORT" -lt 1 ] || [ "$PORT" -gt 65535 ]; then
             echo "FAILURE: server.port must be between 1 and 65535, got '$PORT'" | tee -a config_validation.log
+            echo "APPLICATION FAILED TO START" | tee -a config_validation.log
+            echo "Failed to bind properties under 'server.port' to int" | tee -a config_validation.log
             exit 1
           fi
 
           APP_NAME=$(grep '^spring.application.name=' "$PROPS" | head -1 | cut -d'=' -f2-)
           if [ -z "$(echo "$APP_NAME" | tr -d '[:space:]')" ]; then
             echo "FAILURE: spring.application.name cannot be empty" | tee -a config_validation.log
+            echo "APPLICATION FAILED TO START" | tee -a config_validation.log
+            echo "Configuration property 'spring.application.name' must not be empty" | tee -a config_validation.log
             exit 1
           fi
 
           DB_URL=$(grep '^spring.datasource.url=' "$PROPS" | head -1 | cut -d'=' -f2-)
           if [ -z "$(echo "$DB_URL" | tr -d '[:space:]')" ]; then
             echo "FAILURE: spring.datasource.url cannot be empty" | tee -a config_validation.log
+            echo "APPLICATION FAILED TO START" | tee -a config_validation.log
             exit 1
           fi
 
