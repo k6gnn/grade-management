@@ -150,51 +150,57 @@ pipeline {
                 stage('M8 - Configuration Validation') {
                     steps {
                         sh '''
-                            echo "=== M8 Configuration Validation Gate ==="
+                            echo "=== M8 Configuration Validation Gate ===" | tee config_validation.log
 
-                            echo "--- Validating pom.xml ---"
+                            echo "--- Validating pom.xml ---" | tee -a config_validation.log
                             if [ ! -f "pom.xml" ]; then
-                                echo "FAILURE: pom.xml not found"
+                                echo "FAILURE: pom.xml not found" | tee -a config_validation.log
                                 exit 1
                             fi
 
                             for element in "groupId" "artifactId" "version" "dependencies" "build"; do
                                 if grep -q "<$element>" pom.xml; then
-                                    echo "OK: <$element> found"
+                                    echo "OK: <$element> found" | tee -a config_validation.log
                                 else
-                                    echo "FAILURE: <$element> missing from pom.xml"
+                                    echo "FAILURE: <$element> missing from pom.xml" | tee -a config_validation.log
                                     exit 1
                                 fi
                             done
 
-                            echo "--- Validating application.properties ---"
+                            echo "--- Validating application.properties ---" | tee -a config_validation.log
                             PROPS="src/main/resources/application.properties"
                             if [ ! -f "$PROPS" ]; then
-                                echo "FAILURE: application.properties not found"
+                                echo "FAILURE: application.properties not found" | tee -a config_validation.log
                                 exit 1
                             fi
 
                             for key in "spring.application.name" "server.port" "spring.datasource.url"; do
                                 if grep -q "^$key=" "$PROPS"; then
-                                    echo "OK: $key found"
+                                    echo "OK: $key found" | tee -a config_validation.log
                                 else
-                                    echo "FAILURE: Required key '$key' missing"
+                                    echo "FAILURE: Required key '$key' missing" | tee -a config_validation.log
                                     exit 1
                                 fi
                             done
 
                             PORT=$(grep "^server.port=" "$PROPS" | head -1 | cut -d= -f2- | tr -d "[:space:]")
                             if ! echo "$PORT" | grep -Eq "^[0-9]+$"; then
-                                echo "FAILURE: server.port must be numeric, got '$PORT'"
+                                echo "FAILURE: server.port must be numeric, got '$PORT'" | tee -a config_validation.log
                                 exit 1
                             fi
                             if [ "$PORT" -lt 1 ] || [ "$PORT" -gt 65535 ]; then
-                                echo "FAILURE: server.port out of range: $PORT"
+                                echo "FAILURE: server.port out of range: $PORT" | tee -a config_validation.log
                                 exit 1
                             fi
 
-                            echo "Configuration validation passed."
+                            echo "Configuration validation passed." | tee -a config_validation.log
                         '''
+                    }
+                    post {
+                        always {
+                            archiveArtifacts artifacts: 'config_validation.log', allowEmptyArchive: true
+                            stash name: 'config-validation-log', includes: 'config_validation.log', allowEmpty: true
+                        }
                     }
                 }
             }
@@ -440,9 +446,10 @@ EOF
                     script {
                         // Use python via docker for the post step
                         docker.image('python:3.11-slim').inside {
-                        try { unstash 'm14-report'    } catch (e) { echo "No M14 report stash: ${e.message}" }
-                        try { unstash 'build-log'     } catch (e) { echo "No build-log stash: ${e.message}" }
-                        try { unstash 'test-artifacts'} catch (e) { echo "No test-artifacts stash: ${e.message}" }
+                        try { unstash 'm14-report'            } catch (e) { echo "No M14 report stash: ${e.message}" }
+                        try { unstash 'build-log'             } catch (e) { echo "No build-log stash: ${e.message}" }
+                        try { unstash 'test-artifacts'        } catch (e) { echo "No test-artifacts stash: ${e.message}" }
+                        try { unstash 'config-validation-log' } catch (e) { echo "No config-validation-log stash: ${e.message}" }
 
                         sh """
                             echo "=== M13: ML Failure Classification ==="
@@ -456,6 +463,7 @@ EOF
                             [ -f build.log ]             && cp build.log             logs/build.log             || true
                             [ -f test.log ]              && cp test.log              logs/test.log              || true
                             [ -f flaky_failure_log.txt ] && cp flaky_failure_log.txt logs/flaky_failure_log.txt || true
+                            [ -f config_validation.log ] && cp config_validation.log logs/config_validation.log || true
 
                             # Fetch real stage statuses from Jenkins API
                             BUILD_RESULT="${currentBuild.currentResult}" \\

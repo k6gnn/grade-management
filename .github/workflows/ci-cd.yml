@@ -164,65 +164,73 @@ jobs:
 
       - name: Validate pom.xml structure
         run: |
-          echo "=== Validating pom.xml ==="
+          echo "=== Validating pom.xml ===" | tee -a config_validation.log
           if [ ! -f "pom.xml" ]; then
-            echo "FAILURE: pom.xml not found at repository root"
+            echo "FAILURE: pom.xml not found at repository root" | tee -a config_validation.log
             exit 1
           fi
 
           # Check required pom.xml elements
           for element in "groupId" "artifactId" "version" "dependencies" "build"; do
             if grep -q "<$element>" pom.xml; then
-              echo "OK: <$element> found in pom.xml"
+              echo "OK: <$element> found in pom.xml" | tee -a config_validation.log
             else
-              echo "FAILURE: <$element> missing from pom.xml"
+              echo "FAILURE: <$element> missing from pom.xml" | tee -a config_validation.log
               exit 1
             fi
           done
 
       - name: Validate application.properties
         run: |
-          echo "=== Validating application.properties ==="
+          echo "=== Validating application.properties ===" | tee -a config_validation.log
           PROPS="src/main/resources/application.properties"
 
           if [ ! -f "$PROPS" ]; then
-            echo "FAILURE: application.properties not found"
+            echo "FAILURE: application.properties not found" | tee -a config_validation.log
             exit 1
           fi
 
           for key in "spring.application.name" "server.port" "spring.datasource.url"; do
             if grep -q "^$key=" "$PROPS"; then
-              echo "OK: $key found"
+              echo "OK: $key found" | tee -a config_validation.log
             else
-              echo "FAILURE: Required key '$key' missing from application.properties"
+              echo "FAILURE: Required key '$key' missing from application.properties" | tee -a config_validation.log
               exit 1
             fi
           done
 
           PORT=$(grep '^server.port=' "$PROPS" | head -1 | cut -d'=' -f2- | tr -d '[:space:]')
           if ! [[ "$PORT" =~ ^[0-9]+$ ]]; then
-            echo "FAILURE: server.port must be numeric, got '$PORT'"
+            echo "FAILURE: server.port must be numeric, got '$PORT'" | tee -a config_validation.log
             exit 1
           fi
 
           if [ "$PORT" -lt 1 ] || [ "$PORT" -gt 65535 ]; then
-            echo "FAILURE: server.port must be between 1 and 65535, got '$PORT'"
+            echo "FAILURE: server.port must be between 1 and 65535, got '$PORT'" | tee -a config_validation.log
             exit 1
           fi
 
           APP_NAME=$(grep '^spring.application.name=' "$PROPS" | head -1 | cut -d'=' -f2-)
           if [ -z "$(echo "$APP_NAME" | tr -d '[:space:]')" ]; then
-            echo "FAILURE: spring.application.name cannot be empty"
+            echo "FAILURE: spring.application.name cannot be empty" | tee -a config_validation.log
             exit 1
           fi
 
           DB_URL=$(grep '^spring.datasource.url=' "$PROPS" | head -1 | cut -d'=' -f2-)
           if [ -z "$(echo "$DB_URL" | tr -d '[:space:]')" ]; then
-            echo "FAILURE: spring.datasource.url cannot be empty"
+            echo "FAILURE: spring.datasource.url cannot be empty" | tee -a config_validation.log
             exit 1
           fi
 
-          echo "Configuration validation passed."
+          echo "Configuration validation passed." | tee -a config_validation.log
+
+      - name: Upload config validation log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: config-validation-log-${{ github.run_number }}
+          path: config_validation.log
+          if-no-files-found: ignore
 
   # ═══════════════════════════════════════════
   # STAGE 1: BUILD
@@ -610,6 +618,13 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: build-log-${{ github.run_number }}
+          path: logs/
+        continue-on-error: true
+
+      - name: Download config validation log
+        uses: actions/download-artifact@v4
+        with:
+          name: config-validation-log-${{ github.run_number }}
           path: logs/
         continue-on-error: true
 
