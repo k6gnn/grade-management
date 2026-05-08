@@ -218,7 +218,66 @@ def inject_flaky_test():
     print("  Expected behaviour: RuntimeException on attempt 1, passes on attempt 2")
     return True
 
-# ─── Failure 4: Configuration Failure (E4) ───────────────────────────────────
+# ─── Failure 3b: Flaky Test — GitLab/Jenkins variant (E3) ────────────────────
+
+def inject_flaky_test_gitlab():
+    """
+    GitLab/Jenkins-compatible flaky test injection.
+
+    The original marker-file approach uses /tmp which is wiped between
+    retries in GitLab (fresh container per retry) and Jenkins (clean
+    workspace per retry). This variant writes the marker to the project
+    workspace directory (target/), which persists across retries within
+    the same job on both platforms.
+
+    Uses an atomic retry counter:
+      - target/flaky_retry_count.tmp does not exist -> attempt 1 -> fail
+      - file exists -> attempt 2+ -> pass
+
+    Failure category: Flaky test
+    Expected mechanism response: M4 (retry), M5 (quarantine), M6 (trend)
+    """
+    print("\n[INJECT] Flaky test (GitLab/Jenkins variant) -> StudentControllerTest.java")
+    backup(CONTROLLER_TEST)
+
+    content = read_file(CONTROLLER_TEST)
+
+    guard_block = """\
+        // INJECTED: Workspace-based flakiness (GitLab/Jenkins variant, Experiment 3)
+        // Uses target/ directory which persists across retries in the same job,
+        // unlike /tmp which is wiped between retries in fresh-container platforms.
+        java.io.File _targetDir = new java.io.File("target");
+        if (!_targetDir.exists()) { _targetDir.mkdirs(); }
+        java.io.File _flaky_marker = new java.io.File("target", "flaky_retry_count.tmp");
+        if (!_flaky_marker.exists()) {
+            try { _flaky_marker.createNewFile(); } catch (java.io.IOException _ignored) {}
+            throw new RuntimeException(
+                "Simulated transient failure: cold-start instability detected (workspace marker)");
+        }
+        // END INJECTED
+"""
+
+    pattern = (
+        r"(@Test\s*\n"
+        r"\s*void getAllStudents_shouldReturn200WithStudentList\(\)"
+        r"(?:\s*throws\s+\w+(?:\s*,\s*\w+)*)?"
+        r"\s*\{)"
+    )
+
+    def replacer(m):
+        return m.group(1) + "\n" + guard_block
+
+    injected, n = re.subn(pattern, replacer, content, flags=re.DOTALL)
+
+    if n == 0:
+        print("  WARNING: Injection target not found. File may have changed.")
+        return False
+
+    write_file(CONTROLLER_TEST, injected)
+    print("  Injected: workspace marker-file guard into getAllStudents_shouldReturn200WithStudentList")
+    print("  Expected behaviour: RuntimeException on attempt 1, passes on attempt 2")
+    print("  NOTE: Uses target/ directory — persists across retries on GitLab and Jenkins")
+    return True
 
 def inject_configuration_failure():
     """
@@ -779,6 +838,7 @@ FAILURE_TYPES = {
     "compilation":    inject_compilation_failure,
     "test":           inject_test_failure,
     "flaky":          inject_flaky_test,
+    "flaky_gitlab":   inject_flaky_test_gitlab,     # GitLab/Jenkins variant
     "configuration":  inject_configuration_failure,
     "infrastructure": inject_infrastructure_failure,
 
@@ -795,10 +855,12 @@ FAILURE_TYPES = {
     # ── Multi-cause pairs (E6, E7, E9–E12) ────────────────────────────────────
     "compilation_configuration":    inject_compilation_configuration,
     "flaky_infrastructure":         inject_flaky_infrastructure,
+    "flaky_infrastructure_gitlab":  lambda: inject_flaky_test_gitlab() and inject_infrastructure_failure(),
     "compilation_infrastructure":   inject_compilation_infrastructure,
     "test_configuration":           inject_test_configuration,
     "configuration_infrastructure": inject_configuration_infrastructure,
     "flaky_configuration":          inject_flaky_configuration,
+    "flaky_configuration_gitlab":   lambda: inject_flaky_test_gitlab() and inject_configuration_failure(),
 
     # ── Multi-cause triples + quad (E13–E15) ──────────────────────────────────
     "compilation_test_infrastructure":       inject_compilation_test_infrastructure,
