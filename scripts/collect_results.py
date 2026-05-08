@@ -249,12 +249,14 @@ def collect_gitlab(experiment_id: str, run_number: int, injection_type: str, com
     encoded_path = f"{GITLAB_USER}%2F{GITLAB_PROJECT}"
     base = f"https://gitlab.com/api/v4/projects/{encoded_path}"
 
-    # ── Get the pipeline for the specific inject commit ───────────────────────
-    params = {"ref": "main", "per_page": 10, "order_by": "id", "sort": "desc"}
-    if commit_sha:
-        params["sha"] = commit_sha
-        print(f"  Filtering by commit SHA: {commit_sha[:12]}...")
-    resp = requests.get(f"{base}/pipelines", headers=headers, params=params)
+    # ── Find the pipeline matching our inject commit SHA ─────────────────────
+    # GitLab's ?sha= filter is unreliable (async indexing).
+    # Instead fetch recent pipelines and match by sha field manually.
+    resp = requests.get(
+        f"{base}/pipelines",
+        headers=headers,
+        params={"ref": "main", "per_page": 20, "order_by": "id", "sort": "desc"}
+    )
     resp.raise_for_status()
     pipelines = resp.json()
 
@@ -262,7 +264,18 @@ def collect_gitlab(experiment_id: str, run_number: int, injection_type: str, com
         print("  WARNING: No pipelines found.")
         return False
 
-    pipeline = pipelines[0]
+    pipeline = None
+    if commit_sha:
+        print(f"  Filtering by commit SHA: {commit_sha[:12]}...")
+        for p in pipelines:
+            if p.get("sha", "").startswith(commit_sha[:12]):
+                pipeline = p
+                break
+        if not pipeline:
+            print(f"  WARNING: No pipeline found for SHA {commit_sha[:12]} — using most recent")
+            pipeline = pipelines[0]
+    else:
+        pipeline = pipelines[0]
     pipeline_id = pipeline["id"]
     status      = pipeline.get("status", "unknown")
     started_at  = pipeline.get("started_at", "") or ""
@@ -564,15 +577,31 @@ def wait_for_gitlab(timeout_seconds: int = 600, commit_sha: str = None) -> bool:
     base    = f"https://gitlab.com/api/v4/projects/{encoded}"
     print("  Waiting for GitLab pipeline to complete", end="", flush=True)
     deadline = time.time() + timeout_seconds
+
+    # Give GitLab a moment to register the push before polling
+    time.sleep(10)
+
     while time.time() < deadline:
-        params = {"ref": "main", "per_page": 10, "order_by": "id", "sort": "desc"}
-        if commit_sha:
-            params["sha"] = commit_sha
-        resp = requests.get(f"{base}/pipelines", headers=headers, params=params)
+        resp = requests.get(
+            f"{base}/pipelines",
+            headers=headers,
+            params={"ref": "main", "per_page": 20, "order_by": "id", "sort": "desc"}
+        )
         resp.raise_for_status()
         pipelines = resp.json()
-        if pipelines:
-            status = pipelines[0].get("status")
+
+        # Find the pipeline matching our commit SHA
+        target = None
+        if commit_sha and pipelines:
+            for p in pipelines:
+                if p.get("sha", "").startswith(commit_sha[:12]):
+                    target = p
+                    break
+        elif pipelines:
+            target = pipelines[0]
+
+        if target:
+            status = target.get("status")
             if status not in ("running", "pending", "created", "waiting_for_resource"):
                 print(f" done ({status})")
                 return True
