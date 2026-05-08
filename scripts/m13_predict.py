@@ -275,7 +275,19 @@ def extract_features(row: dict) -> list[float]:
         r"yaml\.scanner\.scannerror|invalid yaml|yaml parse error|workflow is not valid|"
         r"the workflow is not valid|mapping values are not allowed|"
         r"did not find expected key|unexpected value '.{0,80}'|"
-        r"a sequence was not expected", c)
+        r"a sequence was not expected|"
+        # Spring Boot configuration failure patterns
+        r"failed to bind properties|applicationcontext failure|"
+        r"application failed to start|"
+        r"bindexception.*failed to bind|"
+        r"configuration property.{0,80}is not valid|"
+        r"invalid value.{0,80}server\.port|"
+        # Custom M8 validation gate patterns (from config_validation.log)
+        r"server\.port must be numeric|"
+        r"invalid_port_value|"
+        r"server\.port.{0,40}invalid|"
+        r"application\.properties.{0,80}invalid|"
+        r"FAILURE: server\.port|FAILURE: spring\.|FAILURE: Required key", c)
     config_lint_format = _bool(
         r"black --check|would reformat|\d+ files? would be reformatted|flake8|ruff.{0,80}error|"
         r"mypy.*error|eslint.{0,80}error|prettier.{0,80}check.{0,80}failed|"
