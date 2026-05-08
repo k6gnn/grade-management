@@ -32,19 +32,6 @@ class StudentControllerTest {
 
     @Test
     void getAllStudents_shouldReturn200WithStudentList() throws Exception {
-        // INJECTED: Workspace-based flakiness (GitLab/Jenkins variant, Experiment 3)
-        // Uses target/ directory which persists across retries in the same job,
-        // unlike /tmp which is wiped between retries in fresh-container platforms.
-        java.io.File _targetDir = new java.io.File("target");
-        if (!_targetDir.exists()) { _targetDir.mkdirs(); }
-        java.io.File _flaky_marker = new java.io.File("target", "flaky_retry_count.tmp");
-        if (!_flaky_marker.exists()) {
-            try { _flaky_marker.createNewFile(); } catch (java.io.IOException _ignored) {}
-            throw new RuntimeException(
-                "Simulated transient failure: cold-start instability detected (workspace marker)");
-        }
-        // END INJECTED
-
         Student s1 = new Student("Alice", 8.5);
         s1.setId(1L);
         Student s2 = new Student("Bob", 6.0);
