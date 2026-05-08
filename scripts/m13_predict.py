@@ -28,11 +28,27 @@ import logging
 import os
 import re
 import sys
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
 import numpy as np
+
+# ---------------------------------------------------------------------------
+# GuardrailParams — must be defined here so joblib can deserialize the
+# model bundle that was saved with this class in train_m13.py.
+# ---------------------------------------------------------------------------
+
+CONFIG_TO_COMPILE_MARGIN    = 0.18
+CONFIG_TO_TEST_MARGIN       = 0.18
+MIN_ALT_PROBA_FOR_GUARDRAIL = 0.30
+
+@dataclass(frozen=True)
+class GuardrailParams:
+    config_to_compile_margin:    float = CONFIG_TO_COMPILE_MARGIN
+    config_to_test_margin:       float = CONFIG_TO_TEST_MARGIN
+    min_alt_proba_for_guardrail: float = MIN_ALT_PROBA_FOR_GUARDRAIL
 
 # ---------------------------------------------------------------------------
 # Logging
