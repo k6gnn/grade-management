@@ -24,6 +24,7 @@ pipeline {
         MAVEN_CLI_OPTS         = '-B --no-transfer-progress'
         M14_THRESHOLD_MODE     = 'balanced'
         M14_MODE               = 'warning_only'
+        JENKINS_API_TOKEN      = credentials('jenkins-api-token')
     }
 
     options {
@@ -456,17 +457,11 @@ EOF
                             [ -f test.log ]              && cp test.log              logs/test.log              || true
                             [ -f flaky_failure_log.txt ] && cp flaky_failure_log.txt logs/flaky_failure_log.txt || true
 
-                            cat > pipeline_status.json << 'ENDJSON'
-{
-  "platform": "jenkins",
-  "job_name": "${env.JOB_NAME}",
-  "build_number": "${env.BUILD_NUMBER}",
-  "build_url": "${env.BUILD_URL}",
-  "commit": "${env.GIT_COMMIT ?: 'unknown'}",
-  "branch": "${env.GIT_BRANCH ?: 'unknown'}",
-  "current_job_status": "${currentBuild.currentResult}"
-}
-ENDJSON
+                            # Fetch real stage statuses from Jenkins API
+                            BUILD_RESULT="${currentBuild.currentResult}" \\
+                            JENKINS_USER="k6gnn" \\
+                            JENKINS_API_TOKEN="${env.JENKINS_API_TOKEN ?: ''}" \\
+                            python scripts/fetch_jenkins_status.py
                             cat pipeline_status.json
 
                             if [ ! -f "scripts/m13_predict.py" ] || [ ! -f "models/m13_model_bundle.pkl" ]; then
