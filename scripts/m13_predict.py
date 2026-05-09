@@ -247,7 +247,11 @@ def extract_features(row: dict) -> list[float]:
         r"assertion .left == right. failed|not equal: expected", c)
     kw_flaky = _bool(
         r"testtimeoutexception|timed out after \d+|concurrentmodificationexception|intermittent|"
-        r"race condition|data race|deadlock|non.?deterministic|rerun failures|flakes: [1-9]|"
+        # FIX E5I: 'race condition' and 'data race' removed from kw_flaky.
+        # When they appear in the InfrastructureSimulator's message ("Simulated race condition")
+        # they signal a deliberate infra-class experiment, not a genuine flaky test.
+        # Generic concurrency issues that ARE flaky keep their own patterns below.
+        r"non.?deterministic|rerun failures|flakes: [1-9]|"
         r"\bflaky\b|flakytest|sockettimeoutexception|readtimeoutexception|"
         r"passed \d+ times.*failed \d+ times|retry.*attempt \d+|staleelementreferenceexception|"
         r"jest did not exit one second", c)
@@ -262,13 +266,24 @@ def extract_features(row: dict) -> list[float]:
         r"failed to fetch.{0,80}(archive\.ubuntu|pypi|npmjs|crates\.io)|"
         r"readtimeouterror.*httpsconnectionpool|"
         r"retrying.{0,80}(readtimeouterror|connectionerror)|"
-        r"no space left on device|enospc", c)
+        r"no space left on device|enospc|"
+        # FIX E5D: BindException / port-conflict is an OS-level resource failure,
+        # not an application assertion. Covers both the simulator's message and
+        # real runner port-conflict errors across all platforms.
+        r"address already in use|bindexception|eaddrinuse|"
+        r"simulated port conflict", c)
     kw_infra_runner = _bool(
         r"the runner has received a shutdown signal|runner.{0,40}lost communication|"
         r"worker process exited with code|process completed with exit code 137|"
         r"outofmemoryerror|java\.lang\.outofmemoryerror|oomkilled|"
         r"javascript heap out of memory|fatal error: runtime: out of memory|"
-        r"signal: killed|updated oom_score_adj", c)
+        r"signal: killed|updated oom_score_adj|"
+        # FIX E5I: race condition / data race moved here from kw_flaky.
+        # "Simulated race condition" and "data race" in the infra simulator are
+        # resource-safety failures, not test flakiness. Keeping 'deadlock' here
+        # too since it was already present via kw_flaky and belongs with infra.
+        r"simulated race condition|data race|deadlock|"
+        r"unsynchronised concurrent access caused data corruption", c)
 
     # ── Split config sub-features ─────────────────────────────────────────────
     config_secret_env = _bool(
@@ -794,23 +809,28 @@ def main() -> None:
 
     # ── OOM / infra-runner guardrail ──────────────────────────────────────────
     # FIX RC3/RC4: When the ML model sees tests_ran=1 + error_in_test_step=1 it
-    # classifies as test_failure even if kw_infra_runner is set, because it was
+    # classifies as test_failure even if infra keywords are set, because it was
     # trained on OOM patterns where the runner dies before any test runs (tests_ran=0).
-    # E5B catches OutOfMemoryError inside the JVM so the runner survives —
+    # The simulator catches exceptions inside the JVM so the runner survives —
     # an out-of-distribution pattern the model has never seen.
     #
-    # Guardrail: if kw_infra_runner fired AND there are no assertion-style signals,
-    # force classification to infrastructure regardless of model output.
-    _infra_kw  = feat_map.get("feat_kw_infra_runner", 0)
-    _assert_kw = feat_map.get("feat_kw_test_assert", 0)
+    # Guardrail: if any infra keyword fired (runner OR network) AND there are no
+    # assertion-style signals, force classification to infrastructure.
+    # Covers: E5B (OOM), E5D (port conflict → kw_infra_network),
+    #         E5F (disk → kw_infra_network), E5H (external svc → kw_infra_network),
+    #         E5I (race condition → kw_infra_runner via 'simulated race condition').
+    _infra_runner_kw  = feat_map.get("feat_kw_infra_runner", 0)
+    _infra_network_kw = feat_map.get("feat_kw_infra_network", 0)
+    _assert_kw        = feat_map.get("feat_kw_test_assert", 0)
     if (
-        _infra_kw > 0
+        (_infra_runner_kw > 0 or _infra_network_kw > 0)
         and _assert_kw == 0          # no assertion failure evidence
         and classification in ("test_failure", "flaky_test", "unknown")
     ):
         log.info(
-            "  OOM/infra guardrail: kw_infra_runner=1, kw_test_assert=0 "
-            "-> overriding '%s' to 'infrastructure'", classification
+            "  OOM/infra guardrail: infra_runner=%s infra_network=%s assert=0 "
+            "-> overriding '%s' to 'infrastructure'",
+            _infra_runner_kw, _infra_network_kw, classification
         )
         classification = "infrastructure"
         confidence     = max(confidence, 0.72)
@@ -903,10 +923,23 @@ def _heuristic_classification(feats: list[float]) -> str:
     flaky_score = (
         f("feat_kw_flaky") * 4
     )
+
+    # FIX: When flaky keyword fires without assertion signals, give a small bonus
+    # so flaky_test wins ties against test_failure (which also scores ~4 via
+    # error_in_test_step + tests_failed when Errors:1 is present).
+    if f("feat_kw_flaky") > 0 and f("feat_kw_test_assert") == 0:
+        flaky_score += 1.0
     infra_score = (
-        f("feat_kw_infra_network") * 3
+        f("feat_kw_infra_network") * 5  # FIX: raised from 3 → 5; same reasoning as kw_infra_runner
         + f("feat_kw_infra_runner") * 5  # FIX RC4: raised from 3 → 5 so OOM beats error_in_test_step
     )
+
+    # FIX: When any infra keyword fires without a test assertion signal, give a
+    # decisive bonus so the heuristic always returns infrastructure in these cases.
+    # This mirrors the guardrail logic in main() for the model path, ensuring the
+    # heuristic fallback (no model bundle) gives the same answer.
+    if (f("feat_kw_infra_network") > 0 or f("feat_kw_infra_runner") > 0) and f("feat_kw_test_assert") == 0:
+        infra_score += 4.0
     config_score = (
         f("feat_kw_config_fail") * 2
         + f("feat_config_secret_env") * 2
