@@ -187,9 +187,9 @@ def extract_features(row: dict) -> list[float]:
         if bd2:
             build_dur = float(bd2.group(1))
         else:
-            elapsed = re.findall(r"Time elapsed: [\d.]+ s", c, re.I)
+            elapsed = re.findall(r"Time elapsed: ([\d.]+) s", c, re.I)
             if elapsed:
-                build_dur = sum(float(x.split()[-2]) for x in elapsed)
+                build_dur = sum(float(x) for x in elapsed)
 
     # ── Frameworks ────────────────────────────────────────────────────────────
     fw_junit  = _bool(r"\bjunit\b|\bsurefire\b|\bfailsafe\b", c)
@@ -733,7 +733,15 @@ def main() -> None:
             raw_pred = model.predict(X)
 
             # Apply evidence-gated guardrail.
-            g_params: dict = guardrail_p if isinstance(guardrail_p, dict) else {}
+            # guardrail_p is stored as a GuardrailParams dataclass in the bundle, not a dict.
+            # Convert with asdict() if needed so .get() calls work correctly.
+            from dataclasses import asdict as _asdict
+            if isinstance(guardrail_p, dict):
+                g_params: dict = guardrail_p
+            elif hasattr(guardrail_p, "__dataclass_fields__"):
+                g_params = _asdict(guardrail_p)
+            else:
+                g_params = {}
             guarded_pred = predict_with_guardrails(
                 model, X, class_names,
                 config_to_compile_margin=g_params.get("config_to_compile_margin", 0.18),
