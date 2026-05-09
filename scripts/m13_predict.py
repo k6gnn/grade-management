@@ -251,8 +251,14 @@ def extract_features(row: dict) -> list[float]:
         # When they appear in the InfrastructureSimulator's message ("Simulated race condition")
         # they signal a deliberate infra-class experiment, not a genuine flaky test.
         # Generic concurrency issues that ARE flaky keep their own patterns below.
+        #
+        # FIX E5H: 'sockettimeoutexception' and 'readtimeoutexception' removed from kw_flaky.
+        # A SocketTimeoutException from a failed external network call is an infrastructure
+        # signal, not flakiness. Having it here caused the model to lean toward flaky_test
+        # for E5H and pulled it outside the classes the infra guardrail covers.
+        # Both are now covered by kw_infra_network instead.
         r"non.?deterministic|rerun failures|flakes: [1-9]|"
-        r"\bflaky\b|flakytest|sockettimeoutexception|readtimeoutexception|"
+        r"\bflaky\b|flakytest|"
         r"passed \d+ times.*failed \d+ times|retry.*attempt \d+|staleelementreferenceexception|"
         r"jest did not exit one second", c)
     kw_infra_network = _bool(
@@ -271,7 +277,13 @@ def extract_features(row: dict) -> list[float]:
         # not an application assertion. Covers both the simulator's message and
         # real runner port-conflict errors across all platforms.
         r"address already in use|bindexception|eaddrinuse|"
-        r"simulated port conflict", c)
+        r"simulated port conflict|"
+        # FIX E5H: socket/read timeouts are infra (external service unavailable),
+        # not flaky tests. Moved here from kw_flaky. Also match the simulator's
+        # message directly so this fires even if the surefire artifact is absent.
+        r"sockettimeoutexception|readtimeoutexception|connect timed out|connection timed out|"
+        r"no route to host|network is unreachable|"
+        r"simulated external service unavailable", c)
     kw_infra_runner = _bool(
         r"the runner has received a shutdown signal|runner.{0,40}lost communication|"
         r"worker process exited with code|process completed with exit code 137|"
@@ -825,13 +837,31 @@ def main() -> None:
     # Covers: E5B (OOM), E5D (port conflict → kw_infra_network),
     #         E5F (disk → kw_infra_network), E5H (external svc → kw_infra_network),
     #         E5I (race condition → kw_infra_runner via 'simulated race condition').
+    #
+    # FIX E5H: Extended to also override 'configuration' mispredictions.
+    # Previously the guardrail only caught test_failure/flaky_test/unknown.
+    # The ML model can predict 'configuration' on noisy low-signal inputs (e.g.
+    # when SocketTimeoutException was still in kw_flaky it could push the model
+    # toward configuration via feat_config_* interactions). The true-config guard
+    # (feat_map["feat_config_yaml_workflow"] etc.) prevents false positives: we
+    # only override 'configuration' when no genuine config signal is present.
     _infra_runner_kw  = feat_map.get("feat_kw_infra_runner", 0)
     _infra_network_kw = feat_map.get("feat_kw_infra_network", 0)
     _assert_kw        = feat_map.get("feat_kw_test_assert", 0)
+    _true_config_kw   = (
+        feat_map.get("feat_config_yaml_workflow", 0)
+        + feat_map.get("feat_config_secret_env", 0)
+        + feat_map.get("feat_config_auth_permission", 0)
+        + feat_map.get("feat_config_tool_version", 0)
+        + feat_map.get("feat_dep_resolution_without_network", 0)
+    )
+    _infra_guardrail_classes = ("test_failure", "flaky_test", "unknown", "configuration")
     if (
         (_infra_runner_kw > 0 or _infra_network_kw > 0)
         and _assert_kw == 0          # no assertion failure evidence
-        and classification in ("test_failure", "flaky_test", "unknown")
+        and classification in _infra_guardrail_classes
+        # only override 'configuration' when no true config signal is present
+        and not (classification == "configuration" and _true_config_kw > 0)
     ):
         log.info(
             "  OOM/infra guardrail: infra_runner=%s infra_network=%s assert=0 "
@@ -847,10 +877,12 @@ def main() -> None:
     # Use None as default so absent keys (stages that never ran) are treated as
     # skipped, not "success".  Your pipeline_status.json won't contain test_status
     # or package_status when M8 fails because those stages never executed.
-    _build_st  = status.get("build_status")   # None if key absent
-    _test_st   = status.get("test_status")    # None if key absent
-    _config_st = status.get("config_status")
-    _SKIPPED   = {"skipped", "unknown", "", None}
+    _build_st   = status.get("build_status")   # None if key absent
+    _test_st    = status.get("test_status")    # None if key absent
+    _config_st  = status.get("config_status")
+    _package_st = status.get("package_status")
+    _SKIPPED    = {"skipped", "unknown", "", None}
+    _SUCCESS    = {"success", "SUCCESS"}
     config_stage_only = (
         _config_st in ("failure", "failed", "FAILURE")
         and _build_st in _SKIPPED
@@ -866,6 +898,29 @@ def main() -> None:
         probabilities["configuration"] = confidence
         guardrail_applied = True
         model_used = model_used + "+stage_override"
+
+    # ── Package-stage-only override ───────────────────────────────────────────
+    # FIX E5G: When build and test both succeed but package fails, M13 has no
+    # log text from the package stage (it is never uploaded as an artifact).
+    # The model therefore sees near-zero features and can classify anything.
+    # A package-only failure is always an infrastructure/artifact problem:
+    # the compile and test signals were clean, so it cannot be compilation,
+    # test assertion, configuration, or flakiness. Override unconditionally.
+    package_stage_only = (
+        _package_st in ("failure", "failed", "FAILURE")
+        and _build_st in _SUCCESS
+        and _test_st  in _SUCCESS
+    )
+    if package_stage_only and classification != "infrastructure":
+        log.info(
+            "  Stage override: package_stage_only=True (build=success, test=success) "
+            "-> overriding '%s' to 'infrastructure'", classification
+        )
+        classification = "infrastructure"
+        confidence     = max(confidence, 0.75)
+        probabilities["infrastructure"] = confidence
+        guardrail_applied = True
+        model_used = model_used + "+package_stage_override"
     report = {
         "classification":  classification,
         "confidence":      round(confidence, 4),
