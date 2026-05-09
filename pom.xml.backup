@@ -62,25 +62,6 @@
                 <groupId>org.springframework.boot</groupId>
                 <artifactId>spring-boot-maven-plugin</artifactId>
             </plugin>
-
-            <!-- INJECTED: Corrupted artifact simulation (E5g) -->
-            <plugin>
-                <groupId>org.apache.maven.plugins</groupId>
-                <artifactId>maven-antrun-plugin</artifactId>
-                <executions>
-                    <execution>
-                        <id>corrupt-artifact</id>
-                        <phase>package</phase>
-                        <goals><goal>run</goal></goals>
-                        <configuration>
-                            <target>
-                                <delete dir="target" includeemptydirs="true" quiet="true"/>
-                                <echo message="INJECTED: target directory deleted to simulate corrupted artifact (E5g)"/>
-                            </target>
-                        </configuration>
-                    </execution>
-                </executions>
-            </plugin>
         </plugins>
     </build>
 
