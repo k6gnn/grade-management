@@ -1,0 +1,30 @@
+# Step 2 — Multi-cause pairs
+.\scripts\run_experiment.ps1 E6 1 compilation_configuration github
+.\scripts\run_experiment.ps1 E6 2 compilation_configuration github
+.\scripts\run_experiment.ps1 E6 3 compilation_configuration github
+.\scripts\run_experiment.ps1 E7 1 flaky_infrastructure github
+.\scripts\run_experiment.ps1 E7 2 flaky_infrastructure github
+.\scripts\run_experiment.ps1 E7 3 flaky_infrastructure github
+.\scripts\run_experiment.ps1 E9 1 compilation_infrastructure github
+.\scripts\run_experiment.ps1 E9 2 compilation_infrastructure github
+.\scripts\run_experiment.ps1 E9 3 compilation_infrastructure github
+.\scripts\run_experiment.ps1 E10 1 test_configuration github
+.\scripts\run_experiment.ps1 E10 2 test_configuration github
+.\scripts\run_experiment.ps1 E10 3 test_configuration github
+.\scripts\run_experiment.ps1 E11 1 configuration_infrastructure github
+.\scripts\run_experiment.ps1 E11 2 configuration_infrastructure github
+.\scripts\run_experiment.ps1 E11 3 configuration_infrastructure github
+.\scripts\run_experiment.ps1 E12 1 flaky_configuration github
+.\scripts\run_experiment.ps1 E12 2 flaky_configuration github
+.\scripts\run_experiment.ps1 E12 3 flaky_configuration github
+
+# Step 3 — Triples and quad
+.\scripts\run_experiment.ps1 E13 1 compilation_test_infrastructure github
+.\scripts\run_experiment.ps1 E13 2 compilation_test_infrastructure github
+.\scripts\run_experiment.ps1 E13 3 compilation_test_infrastructure github
+.\scripts\run_experiment.ps1 E14 1 test_configuration_infrastructure github
+.\scripts\run_experiment.ps1 E14 2 test_configuration_infrastructure github
+.\scripts\run_experiment.ps1 E14 3 test_configuration_infrastructure github
+.\scripts\run_experiment.ps1 E15 1 all github
+.\scripts\run_experiment.ps1 E15 2 all github
+.\scripts\run_experiment.ps1 E15 3 all github
