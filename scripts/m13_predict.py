@@ -487,8 +487,25 @@ def predict_with_guardrails(
 # ---------------------------------------------------------------------------
 
 def collect_logs(logs_dir: Path) -> str:
-    """Collect and concatenate all log files from logs_dir."""
+    """Collect and concatenate all log files from logs_dir.
+
+    Also includes config_validation.log from the workspace root when present,
+    because Jenkins unstashes it there before copying it into logs/.  This
+    ensures M8 configuration signals are always present in the feature text
+    regardless of which copy succeeds first.
+    """
     parts: list[str] = []
+
+    # Always try to pick up config_validation.log from the workspace root
+    # (Jenkins post-step unstashes it there; it may not yet be in logs/)
+    root_config_log = Path("config_validation.log")
+    if root_config_log.exists() and root_config_log not in logs_dir.glob("*.log"):
+        try:
+            parts.append(root_config_log.read_text(encoding="utf-8", errors="replace"))
+            log.info("Included workspace-root config_validation.log")
+        except Exception as exc:
+            log.warning("Could not read config_validation.log: %s", exc)
+
     for pattern in ("*.log", "*.txt", "surefire-reports/*.txt",
                      "surefire-reports/**/*.txt"):
         for p in sorted(logs_dir.glob(pattern)):
@@ -761,10 +778,17 @@ def main() -> None:
     # Requiring text signals caused false negatives on Jenkins when
     # config_validation.log was absent from the collected logs directory.
     feat_map = dict(zip(FEATURE_NAMES, feats))
+    # Use None as default so absent keys (stages that never ran) are treated as
+    # skipped, not "success".  Your pipeline_status.json won't contain test_status
+    # or package_status when M8 fails because those stages never executed.
+    _build_st  = status.get("build_status")   # None if key absent
+    _test_st   = status.get("test_status")    # None if key absent
+    _config_st = status.get("config_status")
+    _SKIPPED   = {"skipped", "unknown", "", None}
     config_stage_only = (
-        status.get("config_status", "success") in ("failure", "failed", "FAILURE")
-        and status.get("build_status", "success") in ("skipped", "unknown", "")
-        and status.get("test_status", "success") in ("skipped", "unknown", "")
+        _config_st in ("failure", "failed", "FAILURE")
+        and _build_st in _SKIPPED
+        and _test_st  in _SKIPPED
     )
     if config_stage_only and classification != "configuration":
         log.info(
@@ -846,11 +870,22 @@ def _heuristic_classification(feats: list[float]) -> str:
     config_score = (
         f("feat_kw_config_fail") * 2
         + f("feat_config_secret_env") * 2
-        + f("feat_config_yaml_workflow") * 2
+        + f("feat_config_yaml_workflow") * 2   # includes M8 patterns like 'server.port must be numeric'
         + f("feat_config_auth_permission")
         + f("feat_config_missing_file")
         + f("feat_config_no_compile")
+        # Added: these sub-features were missing and caused config to lose against compile/infra
+        + f("feat_config_tool_version")
+        + f("feat_config_lint_format")
+        + f("feat_config_strong_only") * 3     # strong signal: config signals present AND no compile signals
+        + f("feat_config_dep_resolution_strong")
+        + f("feat_dep_resolution_without_network")
     )
+
+    # If strong config signals are present and there are NO strong compile signals,
+    # give a bonus to prevent compile noise from winning.
+    if f("feat_config_strong_only") > 0 and f("feat_kw_compile_fail") == 0:
+        config_score += 2.0
 
     scores = {
         "compilation":    compile_score,
