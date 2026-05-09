@@ -369,28 +369,56 @@ def inject_infrastructure_failure():
 
 def inject_oom():
     """
-    Creates .mvn/jvm.config with -Xmx1m to force a JVM startup failure
-    during Maven build/test.
+    Injects -Xmx32m into the Maven Surefire plugin argLine in pom.xml so
+    the forked test JVM starts with a severely restricted heap.
 
-    NOTE: On GitHub Actions, -Xmx1m causes the JVM to fail at startup with
-    "Could not reserve enough space for object heap" rather than a runtime
-    OutOfMemoryError — but the failure category (infrastructure) is correct.
+    Why pom.xml and NOT .mvn/jvm.config:
+      1. The workflow sets MAVEN_OPTS=-Xmx1024m at the env level.
+         When MAVEN_OPTS and jvm.config both contain -Xmx, the JVM uses
+         the FIRST occurrence — MAVEN_OPTS is always processed first, so
+         jvm.config -Xmx1m is silently ignored.
+      2. Maven Surefire (3.x) forks a SEPARATE child JVM to run tests.
+         That child JVM does not read .mvn/jvm.config at all; it only
+         uses the <argLine> element from the Surefire plugin configuration.
+
+    Fix: inject a <plugin> block that adds -Xmx32m to the Surefire argLine.
+    32m is enough to start the JVM and load test classes, but too small to
+    run the Spring ApplicationContext, which reliably produces OutOfMemoryError.
     Failure category: Infrastructure
     Expected mechanism response: M1 (retry), M10 (fresh container)
     """
-    print("\n[INJECT] OOM — Memory exhaustion -> .mvn/jvm.config")
+    print("\n[INJECT] OOM — Memory exhaustion -> pom.xml (Surefire argLine)")
+    if not backup(POM_XML):
+        return False
 
-    os.makedirs(".mvn", exist_ok=True)
+    content = read_file(POM_XML)
 
-    if os.path.exists(JVM_CONFIG):
-        if not backup(JVM_CONFIG):
-            return False
-    else:
-        backup_new_file(JVM_CONFIG)
+    surefire_plugin = """
+            <!-- INJECTED: OOM simulation (E5b) — restricts test JVM heap to 32m -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <configuration>
+                    <!-- 32m is enough to start the JVM but too small for Spring context -->
+                    <argLine>-Xmx32m</argLine>
+                </configuration>
+            </plugin>
+"""
 
-    write_file(JVM_CONFIG, "-Xmx1m\n")
-    print("  Injected: -Xmx1m JVM heap limit into .mvn/jvm.config")
-    print("  Expected error: JVM startup failure — could not reserve heap space")
+    target = "        </plugins>"
+    if target not in content:
+        print("  WARNING: '</plugins>' target not found in pom.xml. File may have changed.")
+        return False
+
+    injected = content.replace(target, surefire_plugin + target, 1)
+
+    if injected == content:
+        print("  WARNING: Injection target not found. File may have changed.")
+        return False
+
+    write_file(POM_XML, injected)
+    print("  Injected: Surefire argLine -Xmx32m into pom.xml")
+    print("  Expected error: java.lang.OutOfMemoryError in forked test JVM")
     return True
 
 # ─── E5c: Network Instability ─────────────────────────────────────────────────
