@@ -98,26 +98,28 @@ try:
 
     print("Fetched stage statuses:", job_statuses)
 
-    # Post-processing: if build failed but config_validation.log exists,
-    # it means the Pre-Pipeline stage failed (config), not the Build stage.
-    # Jenkins wfapi sometimes reports nested stage failures under the parent.
-    if (job_statuses.get("build_status") == "failed"
-            and "config_status" not in job_statuses
-            and os.path.exists("config_validation.log")):
-        with open("config_validation.log") as f:
-            config_log = f.read()
-        if "FAILURE" in config_log or "failed" in config_log.lower():
-            print("  Post-processing: config_validation.log contains failures")
-            print("  Reclassifying build_status=failed -> config_status=failed")
-            job_statuses["config_status"] = "failed"
-            job_statuses["build_status"]  = "skipped"
-
 except Exception as e:
     print(f"WARNING: Could not fetch stage statuses via Jenkins API: {e}")
     # Fall back to overall build result
     if overall_result in ("FAILURE", "UNSTABLE"):
         job_statuses["build_status"] = "failed"
     print(f"Fallback: using overall_result={overall_result}")
+
+# Post-processing: always runs regardless of whether the API call succeeded.
+# If the overall pipeline failed but config_validation.log records a FAILURE,
+# it means Pre-Pipeline (M8/M9) was the culprit, not the Build stage.
+# Jenkins wfapi sometimes reports nested stage failures under the parent, and
+# in the fallback path the API is unavailable so config_status is never set.
+if (job_statuses.get("build_status") == "failed"
+        and "config_status" not in job_statuses
+        and os.path.exists("config_validation.log")):
+    with open("config_validation.log") as f:
+        config_log = f.read()
+    if "FAILURE" in config_log or "failed" in config_log.lower():
+        print("  Post-processing: config_validation.log contains failures")
+        print("  Reclassifying build_status=failed -> config_status=failed")
+        job_statuses["config_status"] = "failed"
+        job_statuses["build_status"]  = "skipped"
 
 # Determine pipeline_failed
 pipeline_failed = (
