@@ -62,13 +62,21 @@ CREATED_SENTINEL = "__CREATED_BY_INJECTOR__"
 # ─── Utilities ────────────────────────────────────────────────────────────────
 
 def backup(path):
-    """Create a backup of the original file before injection."""
+    """Create a backup of the original file before injection.
+
+    FIX: Returns False (and prints a clear error) if the source file does not
+    exist, rather than crashing with an unhandled FileNotFoundError.
+    """
+    if not os.path.exists(path):
+        print(f"  ERROR: Cannot back up '{path}' — file does not exist.")
+        return False
     backup_path = path + BACKUP_SUFFIX
     if not os.path.exists(backup_path):
         shutil.copy2(path, backup_path)
         print(f"  Backed up: {path} -> {backup_path}")
     else:
         print(f"  Backup already exists: {backup_path}")
+    return True
 
 
 def backup_new_file(path):
@@ -111,6 +119,23 @@ def write_file(path, content):
     with open(path, "w", encoding="utf-8") as f:
         f.write(content)
 
+
+def _append_test_method(content, method_code):
+    """
+    Insert method_code before the last closing brace of a Java test class.
+
+    FIX: Replaces the fragile content.rstrip().endswith('}') pattern used
+    throughout the original. That pattern silently corrupts files that have
+    trailing whitespace or comments after the final brace. This helper
+    finds the last '}' in the file regardless of trailing whitespace.
+    """
+    # Find the position of the last closing brace
+    last_brace = content.rfind("}")
+    if last_brace == -1:
+        return None, "Could not find closing brace of test class."
+    return content[:last_brace] + method_code + "\n}", None
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # SINGLE-FAULT INJECTIONS (E1–E5) — ORIGINAL, UNCHANGED
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -125,7 +150,8 @@ def inject_compilation_failure():
     Expected mechanism response: M1 (retry), M3 (notification + lockout)
     """
     print("\n[INJECT] Compilation failure -> StudentController.java")
-    backup(CONTROLLER)
+    if not backup(CONTROLLER):
+        return False
 
     content = read_file(CONTROLLER)
 
@@ -153,7 +179,8 @@ def inject_test_failure():
     Expected mechanism response: M4 (retry), M6 (trend analysis)
     """
     print("\n[INJECT] Test failure -> StudentControllerTest.java")
-    backup(CONTROLLER_TEST)
+    if not backup(CONTROLLER_TEST):
+        return False
 
     content = read_file(CONTROLLER_TEST)
 
@@ -181,7 +208,8 @@ def inject_flaky_test():
     Expected mechanism response: M4 (retry), M5 (quarantine), M6 (trend)
     """
     print("\n[INJECT] Flaky test -> StudentControllerTest.java")
-    backup(CONTROLLER_TEST)
+    if not backup(CONTROLLER_TEST):
+        return False
 
     content = read_file(CONTROLLER_TEST)
 
@@ -223,29 +251,18 @@ def inject_flaky_test():
 def inject_flaky_test_gitlab():
     """
     GitLab/Jenkins-compatible flaky test injection.
-
-    The original marker-file approach uses /tmp which is wiped between
-    retries in GitLab (fresh container per retry) and Jenkins (clean
-    workspace per retry). This variant writes the marker to the project
-    workspace directory (target/), which persists across retries within
-    the same job on both platforms.
-
-    Uses an atomic retry counter:
-      - target/flaky_retry_count.tmp does not exist -> attempt 1 -> fail
-      - file exists -> attempt 2+ -> pass
-
+    Uses target/ directory which persists across retries within the same job.
     Failure category: Flaky test
     Expected mechanism response: M4 (retry), M5 (quarantine), M6 (trend)
     """
     print("\n[INJECT] Flaky test (GitLab/Jenkins variant) -> StudentControllerTest.java")
-    backup(CONTROLLER_TEST)
+    if not backup(CONTROLLER_TEST):
+        return False
 
     content = read_file(CONTROLLER_TEST)
 
     guard_block = """\
         // INJECTED: Workspace-based flakiness (GitLab/Jenkins variant, Experiment 3)
-        // Uses target/ directory which persists across retries in the same job,
-        // unlike /tmp which is wiped between retries in fresh-container platforms.
         java.io.File _targetDir = new java.io.File("target");
         if (!_targetDir.exists()) { _targetDir.mkdirs(); }
         java.io.File _flaky_marker = new java.io.File("target", "flaky_retry_count.tmp");
@@ -279,6 +296,8 @@ def inject_flaky_test_gitlab():
     print("  NOTE: Uses target/ directory — persists across retries on GitLab and Jenkins")
     return True
 
+# ─── Failure 4: Configuration Failure (E4) ───────────────────────────────────
+
 def inject_configuration_failure():
     """
     Corrupts application.properties with an invalid server.port value.
@@ -286,7 +305,8 @@ def inject_configuration_failure():
     Expected mechanism response: M7 (rollback), M8 (validation gate), M9 (env verify)
     """
     print("\n[INJECT] Configuration failure -> application.properties")
-    backup(APP_PROPS)
+    if not backup(APP_PROPS):
+        return False
 
     content = read_file(APP_PROPS)
 
@@ -313,7 +333,8 @@ def inject_infrastructure_failure():
     Expected mechanism response: M1 (retry), M10 (fresh container), M11 (cache invalidation)
     """
     print("\n[INJECT] Infrastructure failure -> pom.xml")
-    backup(POM_XML)
+    if not backup(POM_XML):
+        return False
 
     content = read_file(POM_XML)
 
@@ -348,8 +369,12 @@ def inject_infrastructure_failure():
 
 def inject_oom():
     """
-    Creates .mvn/jvm.config with -Xmx1m to force an OutOfMemoryError
-    during Maven/JVM startup.
+    Creates .mvn/jvm.config with -Xmx1m to force a JVM startup failure
+    during Maven build/test.
+
+    NOTE: On GitHub Actions, -Xmx1m causes the JVM to fail at startup with
+    "Could not reserve enough space for object heap" rather than a runtime
+    OutOfMemoryError — but the failure category (infrastructure) is correct.
     Failure category: Infrastructure
     Expected mechanism response: M1 (retry), M10 (fresh container)
     """
@@ -358,27 +383,28 @@ def inject_oom():
     os.makedirs(".mvn", exist_ok=True)
 
     if os.path.exists(JVM_CONFIG):
-        backup(JVM_CONFIG)
+        if not backup(JVM_CONFIG):
+            return False
     else:
-        # File did not exist — mark for deletion on restore
         backup_new_file(JVM_CONFIG)
 
     write_file(JVM_CONFIG, "-Xmx1m\n")
     print("  Injected: -Xmx1m JVM heap limit into .mvn/jvm.config")
-    print("  Expected error: java.lang.OutOfMemoryError during Maven build/test phase")
+    print("  Expected error: JVM startup failure — could not reserve heap space")
     return True
 
 # ─── E5c: Network Instability ─────────────────────────────────────────────────
 
 def inject_network():
     """
-    Injects a test that attempts to resolve an unreachable host with a
-    very short timeout, simulating network instability / DNS failure.
+    Injects a test that attempts to resolve an unreachable host,
+    simulating network instability / DNS failure.
     Failure category: Infrastructure
     Expected mechanism response: M1 (retry), M10 (fresh container)
     """
     print("\n[INJECT] Network instability -> StudentControllerTest.java")
-    backup(CONTROLLER_TEST)
+    if not backup(CONTROLLER_TEST):
+        return False
 
     content = read_file(CONTROLLER_TEST)
 
@@ -398,13 +424,11 @@ def inject_network():
     }
 """
 
-    # Insert before the last closing brace of the class
-    injected = content.rstrip()
-    if not injected.endswith("}"):
-        print("  WARNING: Could not find closing brace of test class.")
+    injected, err = _append_test_method(content, network_test)
+    if err:
+        print(f"  WARNING: {err}")
         return False
 
-    injected = injected[:-1] + network_test + "\n}"
     write_file(CONTROLLER_TEST, injected)
     print("  Injected: network instability test (UnknownHostException) into StudentControllerTest.java")
     print("  Expected error: RuntimeException — Simulated network instability: DNS resolution failed")
@@ -414,18 +438,13 @@ def inject_network():
 
 def inject_port_conflict():
     """
-    Sets server.port=0 in application.properties AND injects a test
-    that explicitly binds to port 8080 first, then attempts to bind again,
-    simulating a port conflict / EADDRINUSE condition.
+    Injects a test that binds a port twice to simulate EADDRINUSE.
     Failure category: Infrastructure
-    Expected mechanism response: M8 (config gate catches port=0), M10 (fresh container)
-
-    Note: port=0 lets Spring pick a random port, so the ApplicationContext
-    starts. The test itself then simulates the conflict by attempting a
-    duplicate socket bind on a fixed port.
+    Expected mechanism response: M10 (fresh container)
     """
     print("\n[INJECT] Port conflict -> StudentControllerTest.java")
-    backup(CONTROLLER_TEST)
+    if not backup(CONTROLLER_TEST):
+        return False
 
     content = read_file(CONTROLLER_TEST)
 
@@ -451,12 +470,11 @@ def inject_port_conflict():
     }
 """
 
-    injected = content.rstrip()
-    if not injected.endswith("}"):
-        print("  WARNING: Could not find closing brace of test class.")
+    injected, err = _append_test_method(content, port_test)
+    if err:
+        print(f"  WARNING: {err}")
         return False
 
-    injected = injected[:-1] + port_test + "\n}"
     write_file(CONTROLLER_TEST, injected)
     print("  Injected: port conflict test (duplicate ServerSocket bind) into StudentControllerTest.java")
     print("  Expected error: RuntimeException — Simulated port conflict: address already in use")
@@ -472,7 +490,8 @@ def inject_deadlock():
     Expected mechanism response: M12 (timeout cancellation)
     """
     print("\n[INJECT] Deadlock / timeout -> StudentControllerTest.java")
-    backup(CONTROLLER_TEST)
+    if not backup(CONTROLLER_TEST):
+        return False
 
     content = read_file(CONTROLLER_TEST)
 
@@ -484,9 +503,7 @@ def inject_deadlock():
         // Spins indefinitely — JUnit @Timeout or M12 pipeline timeout will interrupt.
         long start = System.currentTimeMillis();
         while (true) {
-            // Busy-wait to simulate a deadlocked thread
             if (System.currentTimeMillis() - start > 60_000) {
-                // Safety valve: give up after 60 s if JUnit timeout is not configured
                 throw new RuntimeException(
                     "Simulated deadlock: thread did not terminate within expected time");
             }
@@ -495,12 +512,11 @@ def inject_deadlock():
     }
 """
 
-    injected = content.rstrip()
-    if not injected.endswith("}"):
-        print("  WARNING: Could not find closing brace of test class.")
+    injected, err = _append_test_method(content, deadlock_test)
+    if err:
+        print(f"  WARNING: {err}")
         return False
 
-    injected = injected[:-1] + deadlock_test + "\n}"
     write_file(CONTROLLER_TEST, injected)
     print("  Injected: infinite-loop test into StudentControllerTest.java")
     print("  Expected error: JUnit TimeoutException or M12 pipeline timeout cancellation")
@@ -510,20 +526,20 @@ def inject_deadlock():
 
 def inject_disk():
     """
-    Injects a test that writes a large number of bytes to the temp
-    directory to simulate disk exhaustion.
-    On GitHub Actions runners (~14 GB free) this will not actually fill
-    the disk, but it will write ~2 GB and then assert that it succeeded,
-    causing a realistic slow-then-fail scenario.
+    Injects a test that writes many small files to simulate disk pressure.
 
-    For a deterministic failure we instead write until IOException
-    (or a quota limit) and throw; if the disk does not fill, we still
-    throw to guarantee pipeline failure.
+    FIX: The original approach wrote a single 4 GB file. On GitHub Actions
+    (~14 GB free disk) this would hit the 10-minute test timeout before
+    filling the disk, so the observed failure mode was timeout (M12) rather
+    than disk exhaustion (IOException). The new approach writes many 100 MB
+    files in quick succession to fill the disk faster and reliably trigger
+    an IOException before the timeout fires.
     Failure category: Infrastructure
-    Expected mechanism response: M12 (timeout), M10 (fresh container)
+    Expected mechanism response: M10 (fresh container), M12 (timeout fallback)
     """
     print("\n[INJECT] Disk exhaustion -> StudentControllerTest.java")
-    backup(CONTROLLER_TEST)
+    if not backup(CONTROLLER_TEST):
+        return False
 
     content = read_file(CONTROLLER_TEST)
 
@@ -531,40 +547,43 @@ def inject_disk():
     @Test
     void simulateDiskExhaustion_shouldFailWithIOException() throws Exception {
         // INJECTED: Simulates disk exhaustion (E5f)
-        // Writes large chunks to a temp file until IOException or 4 GB.
-        java.io.File tmpFile = java.io.File.createTempFile("disk_exhaust_", ".tmp");
-        tmpFile.deleteOnExit();
+        // Writes 100 MB files in a loop until IOException (no space left on device).
+        // Using many smaller files fills the disk faster than one large file,
+        // ensuring IOException fires before the test timeout.
+        java.util.List<java.io.File> tmpFiles = new java.util.ArrayList<>();
         long bytesWritten = 0;
-        long maxBytes = 4L * 1024 * 1024 * 1024; // 4 GB ceiling
-        byte[] chunk = new byte[1024 * 1024]; // 1 MB
+        byte[] chunk = new byte[1024 * 1024]; // 1 MB chunk
         java.util.Arrays.fill(chunk, (byte) 0xFF);
-        try (java.io.FileOutputStream fos = new java.io.FileOutputStream(tmpFile)) {
-            while (bytesWritten < maxBytes) {
-                fos.write(chunk);
-                bytesWritten += chunk.length;
+        try {
+            while (true) {
+                java.io.File tmpFile = java.io.File.createTempFile("disk_exhaust_", ".tmp");
+                tmpFile.deleteOnExit();
+                tmpFiles.add(tmpFile);
+                try (java.io.FileOutputStream fos = new java.io.FileOutputStream(tmpFile)) {
+                    for (int mb = 0; mb < 100; mb++) {  // 100 MB per file
+                        fos.write(chunk);
+                        bytesWritten += chunk.length;
+                    }
+                    fos.getFD().sync();
+                }
             }
         } catch (java.io.IOException e) {
             throw new RuntimeException(
                 "Simulated disk exhaustion: no space left on device after "
                 + (bytesWritten / (1024 * 1024)) + " MB written — " + e.getMessage(), e);
         } finally {
-            tmpFile.delete();
+            for (java.io.File f : tmpFiles) { f.delete(); }
         }
-        // If we reach here the disk did not fill — force failure anyway
-        throw new RuntimeException(
-            "Simulated disk exhaustion: wrote " + (bytesWritten / (1024 * 1024))
-            + " MB without filling disk — injection did not produce expected failure");
     }
 """
 
-    injected = content.rstrip()
-    if not injected.endswith("}"):
-        print("  WARNING: Could not find closing brace of test class.")
+    injected, err = _append_test_method(content, disk_test)
+    if err:
+        print(f"  WARNING: {err}")
         return False
 
-    injected = injected[:-1] + disk_test + "\n}"
     write_file(CONTROLLER_TEST, injected)
-    print("  Injected: disk exhaustion test into StudentControllerTest.java")
+    print("  Injected: disk exhaustion test (100 MB files loop) into StudentControllerTest.java")
     print("  Expected error: RuntimeException — Simulated disk exhaustion")
     return True
 
@@ -572,23 +591,17 @@ def inject_disk():
 
 def inject_artifact():
     """
-    Injects a maven-antrun-plugin into pom.xml that runs during the
-    package phase and deletes the entire target/ directory, so the
-    subsequent 'Verify JAR artifact exists' step in the pipeline finds
-    no JAR and fails with a missing artifact error.
-
-    This reliably simulates a corrupted / missing build artifact without
-    depending on platform-specific filename restrictions.
-
+    Injects a maven-antrun-plugin into pom.xml that deletes target/ during
+    the package phase so no JAR is produced.
     Failure category: Infrastructure
     Expected mechanism response: M7 (rollback), M10 (fresh container)
     """
     print("\n[INJECT] Corrupted artifact -> pom.xml")
-    backup(POM_XML)
+    if not backup(POM_XML):
+        return False
 
     content = read_file(POM_XML)
 
-    # Uses 8-space indentation to match this pom.xml's <build><plugins> block
     corrupt_plugin = """
             <!-- INJECTED: Corrupted artifact simulation (E5g) -->
             <plugin>
@@ -601,7 +614,6 @@ def inject_artifact():
                         <goals><goal>run</goal></goals>
                         <configuration>
                             <target>
-                                <!-- Delete target/ so no JAR exists after packaging -->
                                 <delete dir="target" includeemptydirs="true" quiet="true"/>
                                 <echo message="INJECTED: target directory deleted to simulate corrupted artifact (E5g)"/>
                             </target>
@@ -611,7 +623,6 @@ def inject_artifact():
             </plugin>
 """
 
-    # pom.xml uses 8-space indentation: "        </plugins>"
     target = "        </plugins>"
     if target not in content:
         print("  WARNING: '</plugins>' target not found in pom.xml. File may have changed.")
@@ -632,13 +643,20 @@ def inject_artifact():
 
 def inject_external():
     """
-    Injects a test that calls an unreachable external HTTP endpoint,
-    simulating an unavailable third-party service dependency.
+    Injects a test that calls an unreachable external HTTP endpoint.
+
+    FIX: The original only caught SocketTimeoutException | ConnectException.
+    On some networks, an unreachable RFC 5737 address (192.0.2.1) returns
+    a NoRouteToHostException, which extends IOException but NOT ConnectException
+    directly, so the original catch block would miss it and propagate an
+    unexpected AssertionError instead of the expected RuntimeException.
+    Fixed to catch IOException as the base class.
     Failure category: Infrastructure
     Expected mechanism response: M1 (retry), M10 (fresh container)
     """
     print("\n[INJECT] External service unavailable -> StudentControllerTest.java")
-    backup(CONTROLLER_TEST)
+    if not backup(CONTROLLER_TEST):
+        return False
 
     content = read_file(CONTROLLER_TEST)
 
@@ -646,7 +664,9 @@ def inject_external():
     @Test
     void simulateExternalServiceUnavailable_shouldFailOnTimeout() throws Exception {
         // INJECTED: Simulates external service unavailability (E5h)
-        // Attempts HTTP GET to an unreachable endpoint with a short timeout.
+        // Attempts HTTP GET to an unreachable endpoint (RFC 5737 TEST-NET address).
+        // Catches IOException as base class to handle SocketTimeoutException,
+        // ConnectException, AND NoRouteToHostException across all network environments.
         try {
             java.net.URL url = new java.net.URL("http://192.0.2.1:9999/health");
             java.net.HttpURLConnection conn = (java.net.HttpURLConnection) url.openConnection();
@@ -656,19 +676,18 @@ def inject_external():
             int responseCode = conn.getResponseCode();
             throw new AssertionError(
                 "Expected connection failure but got response code: " + responseCode);
-        } catch (java.net.SocketTimeoutException | java.net.ConnectException e) {
+        } catch (java.io.IOException e) {
             throw new RuntimeException(
                 "Simulated external service unavailable: connection failed — " + e.getMessage(), e);
         }
     }
 """
 
-    injected = content.rstrip()
-    if not injected.endswith("}"):
-        print("  WARNING: Could not find closing brace of test class.")
+    injected, err = _append_test_method(content, external_test)
+    if err:
+        print(f"  WARNING: {err}")
         return False
 
-    injected = injected[:-1] + external_test + "\n}"
     write_file(CONTROLLER_TEST, injected)
     print("  Injected: external service unavailability test into StudentControllerTest.java")
     print("  Expected error: RuntimeException — Simulated external service unavailable")
@@ -679,14 +698,13 @@ def inject_external():
 def inject_race():
     """
     Injects a test that spawns multiple threads concurrently incrementing
-    a shared counter without synchronisation, then asserts an exact count.
-    The assertion fails non-deterministically due to the race, producing a
-    realistic flaky/infrastructure failure.
+    a shared counter without synchronisation.
     Failure category: Infrastructure
     Expected mechanism response: M4 (retry may or may not help), M5 (flaky detection)
     """
     print("\n[INJECT] Race condition -> StudentControllerTest.java")
-    backup(CONTROLLER_TEST)
+    if not backup(CONTROLLER_TEST):
+        return False
 
     content = read_file(CONTROLLER_TEST)
 
@@ -722,19 +740,18 @@ def inject_race():
                 + " but got counter=" + counter[0]
                 + " — unsynchronised concurrent access caused data corruption");
         }
-        // If by chance the count is exact (extremely unlikely), force failure
+        // If by chance the count is exact (extremely unlikely), force failure anyway
         throw new RuntimeException(
             "Simulated race condition: counter reached exact value " + counter[0]
             + " — injection did not produce expected race; re-run to observe non-determinism");
     }
 """
 
-    injected = content.rstrip()
-    if not injected.endswith("}"):
-        print("  WARNING: Could not find closing brace of test class.")
+    injected, err = _append_test_method(content, race_test)
+    if err:
+        print(f"  WARNING: {err}")
         return False
 
-    injected = injected[:-1] + race_test + "\n}"
     write_file(CONTROLLER_TEST, injected)
     print("  Injected: race condition test (unsynchronised counter) into StudentControllerTest.java")
     print("  Expected error: RuntimeException — Simulated race condition")
@@ -743,6 +760,7 @@ def inject_race():
 # ═══════════════════════════════════════════════════════════════════════════════
 # MULTI-CAUSE PAIRS (E6, E7, E9–E12)
 # Each function calls existing single injectors in sequence.
+# Both are always attempted; the return value reflects both results.
 # A single `restore` cleans all touched files.
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -757,6 +775,17 @@ def inject_flaky_infrastructure():
     """E7: Flaky test + Infrastructure"""
     print("\n[INJECT] Multi-cause: Flaky test + Infrastructure (E7)")
     ok1 = inject_flaky_test()
+    ok2 = inject_infrastructure_failure()
+    return ok1 and ok2
+
+def inject_flaky_infrastructure_gitlab():
+    """E7 GitLab/Jenkins variant: Flaky test (workspace) + Infrastructure
+    FIX: Was a lambda using short-circuit 'and', meaning inject_infrastructure_failure()
+    was silently skipped if inject_flaky_test_gitlab() returned False.
+    Now a proper function so both injectors always run.
+    """
+    print("\n[INJECT] Multi-cause: Flaky test (GitLab/Jenkins) + Infrastructure (E7 gitlab)")
+    ok1 = inject_flaky_test_gitlab()
     ok2 = inject_infrastructure_failure()
     return ok1 and ok2
 
@@ -785,6 +814,15 @@ def inject_flaky_configuration():
     """E12: Flaky test + Configuration"""
     print("\n[INJECT] Multi-cause: Flaky test + Configuration (E12)")
     ok1 = inject_flaky_test()
+    ok2 = inject_configuration_failure()
+    return ok1 and ok2
+
+def inject_flaky_configuration_gitlab():
+    """E12 GitLab/Jenkins variant: Flaky test (workspace) + Configuration
+    FIX: Was a lambda using short-circuit 'and'. Now a proper function.
+    """
+    print("\n[INJECT] Multi-cause: Flaky test (GitLab/Jenkins) + Configuration (E12 gitlab)")
+    ok1 = inject_flaky_test_gitlab()
     ok2 = inject_configuration_failure()
     return ok1 and ok2
 
@@ -838,7 +876,7 @@ FAILURE_TYPES = {
     "compilation":    inject_compilation_failure,
     "test":           inject_test_failure,
     "flaky":          inject_flaky_test,
-    "flaky_gitlab":   inject_flaky_test_gitlab,     # GitLab/Jenkins variant
+    "flaky_gitlab":   inject_flaky_test_gitlab,
     "configuration":  inject_configuration_failure,
     "infrastructure": inject_infrastructure_failure,
 
@@ -855,12 +893,12 @@ FAILURE_TYPES = {
     # ── Multi-cause pairs (E6, E7, E9–E12) ────────────────────────────────────
     "compilation_configuration":    inject_compilation_configuration,
     "flaky_infrastructure":         inject_flaky_infrastructure,
-    "flaky_infrastructure_gitlab":  lambda: inject_flaky_test_gitlab() and inject_infrastructure_failure(),
+    "flaky_infrastructure_gitlab":  inject_flaky_infrastructure_gitlab,  # FIX: was lambda
     "compilation_infrastructure":   inject_compilation_infrastructure,
     "test_configuration":           inject_test_configuration,
     "configuration_infrastructure": inject_configuration_infrastructure,
     "flaky_configuration":          inject_flaky_configuration,
-    "flaky_configuration_gitlab":   lambda: inject_flaky_test_gitlab() and inject_configuration_failure(),
+    "flaky_configuration_gitlab":   inject_flaky_configuration_gitlab,   # FIX: was lambda
 
     # ── Multi-cause triples + quad (E13–E15) ──────────────────────────────────
     "compilation_test_infrastructure":       inject_compilation_test_infrastructure,
@@ -897,7 +935,10 @@ def main():
         print(f"Commit and push to trigger the pipeline and observe self-healing.")
         print(f"To restore: python scripts/inject_failure.py restore")
     else:
+        # FIX: exit with code 1 on injection failure so run_experiment.ps1
+        # can detect the problem and abort instead of pushing a broken state.
         print(f"\nInjection failed — check the WARNING above.")
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()
