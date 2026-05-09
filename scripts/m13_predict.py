@@ -532,23 +532,25 @@ def infer_failing_step(status: dict, log_text: str) -> str:
     config_st  = status.get("config_status", "success")
     package_st = status.get("package_status", "success")
 
-    if config_st == "failure":
+    _fail = {"failure", "failed", "FAILURE", "unstable", "UNSTABLE"}
+
+    if config_st in _fail:
         # Configuration validation failure — check log for detail.
         if "pom.xml" in log_text.lower() or "application.properties" in log_text.lower():
             return "configuration validation"
         return "setup"
 
-    if build_st == "failure":
+    if build_st in _fail:
         # Compile step failed.
         return "compile build"
 
-    if test_st == "failure":
+    if test_st in _fail:
         # Determine if it's a test or flaky pattern.
         if re.search(r"attempt_failed|flaky|intermittent|retry", log_text, re.I):
             return "test flaky"
         return "test"
 
-    if package_st == "failure":
+    if package_st in _fail:
         return "package"
 
     # No obvious stage failure — inspect logs.
@@ -752,25 +754,21 @@ def main() -> None:
         log.info("  Heuristic fallback (no model): %s", classification)
 
     # ── Stage-based configuration override ───────────────────────────────────
-    # When the config stage fails and build/test/package are all skipped,
-    # AND strong configuration signals are present, override to configuration.
-    # This handles the M8 gate pattern where the pipeline stops at pre-pipeline
-    # validation before any Java compilation or testing occurs.
+    # When the config stage fails and build/test are both skipped, the pipeline
+    # stopped at the M8/M9 pre-pipeline gate.  That gate only exits non-zero for
+    # configuration problems (invalid port, missing key, bad YAML, missing env
+    # var), so the stage outcome alone is sufficient — no keyword signals needed.
+    # Requiring text signals caused false negatives on Jenkins when
+    # config_validation.log was absent from the collected logs directory.
     feat_map = dict(zip(FEATURE_NAMES, feats))
-    config_signals_active = (
-        feat_map.get("feat_kw_config_fail", 0) > 0
-        or feat_map.get("feat_config_yaml_workflow", 0) > 0
-        or feat_map.get("feat_config_secret_env", 0) > 0
-        or feat_map.get("feat_config_missing_file", 0) > 0
-    )
     config_stage_only = (
         status.get("config_status", "success") in ("failure", "failed", "FAILURE")
         and status.get("build_status", "success") in ("skipped", "unknown", "")
         and status.get("test_status", "success") in ("skipped", "unknown", "")
     )
-    if config_stage_only and config_signals_active and classification != "configuration":
+    if config_stage_only and classification != "configuration":
         log.info(
-            "  Stage override: config_stage_only=True + config_signals_active=True "
+            "  Stage override: config_stage_only=True "
             "-> overriding '%s' to 'configuration'", classification
         )
         classification = "configuration"
