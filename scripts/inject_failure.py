@@ -50,6 +50,7 @@ import shutil
 CONTROLLER      = "src/main/java/com/university/grades/controller/StudentController.java"
 CONTROLLER_TEST = "src/test/java/com/university/grades/controller/StudentControllerTest.java"
 SERVICE_TEST    = "src/test/java/com/university/grades/service/StudentServiceTest.java"
+INFRA_SIMULATOR = "src/test/java/com/university/grades/infra/InfrastructureSimulatorTest.java"
 APP_PROPS       = "src/main/resources/application.properties"
 POM_XML         = "pom.xml"
 JVM_CONFIG      = ".mvn/jvm.config"
@@ -363,257 +364,113 @@ def inject_infrastructure_failure():
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # INFRASTRUCTURE VARIANTS (E5b–E5i)
+#
+# All eight variants are implemented as @Test methods inside
+# InfrastructureSimulatorTest.java.  That class has NO Spring context, so
+# the full JVM heap is available (critical for OOM), and each test runs
+# without web-layer overhead competing for resources.
+#
+# Every method in the simulator is guarded by:
+#   assumeTrue("E5x".equals(ACTIVE_EXPERIMENT))
+# so on a clean baseline ALL tests are skipped and the pipeline passes.
+#
+# Injection: one string replacement — ACTIVE_EXPERIMENT = "NONE" -> "E5B" etc.
+# Restore  : the backup/restore mechanism handles the whole file as usual.
 # ═══════════════════════════════════════════════════════════════════════════════
+
+# Sentinel: the exact Java constant declaration line in InfrastructureSimulatorTest.
+# Must match the static field line precisely — the Javadoc also contains
+# ACTIVE_EXPERIMENT = "NONE" in examples, so we anchor to the full declaration.
+_SIMULATOR_NONE = '    static final String ACTIVE_EXPERIMENT = "NONE";'
+
+
+def _inject_simulator(experiment_id: str) -> bool:
+    """
+    Enable exactly one experiment in InfrastructureSimulatorTest by replacing
+    the ACTIVE_EXPERIMENT constant value.  A single string replacement is the
+    only change made to the file — no code is appended or deleted.
+    """
+    exp = experiment_id.upper()
+    print(f"\n[INJECT] InfrastructureSimulatorTest -> ACTIVE_EXPERIMENT = {exp!r}")
+
+    if not backup(INFRA_SIMULATOR):
+        return False
+
+    content = read_file(INFRA_SIMULATOR)
+    target = f'    static final String ACTIVE_EXPERIMENT = "{exp}";'
+
+    if _SIMULATOR_NONE not in content:
+        print(f"  WARNING: clean sentinel not found in simulator file.")
+        print(f"  Expected: {_SIMULATOR_NONE!r}")
+        print("  File may already have an active experiment or have been modified.")
+        return False
+
+    injected = content.replace(_SIMULATOR_NONE, target, 1)
+    write_file(INFRA_SIMULATOR, injected)
+    print(f"  Enabled: {exp} test in InfrastructureSimulatorTest.java")
+    return True
+
 
 # ─── E5b: Memory Exhaustion (OOM) ────────────────────────────────────────────
 
 def inject_oom():
     """
-    Injects -Xmx32m into the Maven Surefire plugin argLine in pom.xml so
-    the forked test JVM starts with a severely restricted heap.
-
-    Why pom.xml and NOT .mvn/jvm.config:
-      1. The workflow sets MAVEN_OPTS=-Xmx1024m at the env level.
-         When MAVEN_OPTS and jvm.config both contain -Xmx, the JVM uses
-         the FIRST occurrence — MAVEN_OPTS is always processed first, so
-         jvm.config -Xmx1m is silently ignored.
-      2. Maven Surefire (3.x) forks a SEPARATE child JVM to run tests.
-         That child JVM does not read .mvn/jvm.config at all; it only
-         uses the <argLine> element from the Surefire plugin configuration.
-
-    Fix: inject a <plugin> block that adds -Xmx32m to the Surefire argLine.
-    32m is enough to start the JVM and load test classes, but too small to
-    run the Spring ApplicationContext, which reliably produces OutOfMemoryError.
+    Enables the OOM test in InfrastructureSimulatorTest.
+    The test allocates 64 MB chunks then 1 MB chunks until OutOfMemoryError.
+    No Spring context runs, so the full JVM heap is available.
     Failure category: Infrastructure
     Expected mechanism response: M1 (retry), M10 (fresh container)
     """
-    print("\n[INJECT] OOM — Memory exhaustion -> pom.xml (Surefire argLine)")
-    if not backup(POM_XML):
-        return False
+    return _inject_simulator("E5B")
 
-    content = read_file(POM_XML)
-
-    surefire_plugin = """
-            <!-- INJECTED: OOM simulation (E5b) — restricts test JVM heap to 32m -->
-            <plugin>
-                <groupId>org.apache.maven.plugins</groupId>
-                <artifactId>maven-surefire-plugin</artifactId>
-                <configuration>
-                    <!-- 32m is enough to start the JVM but too small for Spring context -->
-                    <argLine>-Xmx32m</argLine>
-                </configuration>
-            </plugin>
-"""
-
-    target = "        </plugins>"
-    if target not in content:
-        print("  WARNING: '</plugins>' target not found in pom.xml. File may have changed.")
-        return False
-
-    injected = content.replace(target, surefire_plugin + target, 1)
-
-    if injected == content:
-        print("  WARNING: Injection target not found. File may have changed.")
-        return False
-
-    write_file(POM_XML, injected)
-    print("  Injected: Surefire argLine -Xmx32m into pom.xml")
-    print("  Expected error: java.lang.OutOfMemoryError in forked test JVM")
-    return True
 
 # ─── E5c: Network Instability ─────────────────────────────────────────────────
 
 def inject_network():
     """
-    Injects a test that attempts to resolve an unreachable host,
-    simulating network instability / DNS failure.
+    Enables the network instability test in InfrastructureSimulatorTest.
+    The test resolves a .invalid TLD host — guaranteed UnknownHostException.
     Failure category: Infrastructure
     Expected mechanism response: M1 (retry), M10 (fresh container)
     """
-    print("\n[INJECT] Network instability -> StudentControllerTest.java")
-    if not backup(CONTROLLER_TEST):
-        return False
+    return _inject_simulator("E5C")
 
-    content = read_file(CONTROLLER_TEST)
-
-    network_test = """
-    @Test
-    void simulateNetworkInstability_shouldFailOnUnreachableHost() throws Exception {
-        // INJECTED: Simulates network instability (E5c)
-        // Attempts to connect to an unresolvable host — will throw UnknownHostException.
-        try {
-            java.net.InetAddress.getByName("this.host.does.not.exist.invalid");
-            throw new AssertionError(
-                "Expected UnknownHostException but no exception was thrown — network injection failed");
-        } catch (java.net.UnknownHostException e) {
-            throw new RuntimeException(
-                "Simulated network instability: DNS resolution failed — " + e.getMessage(), e);
-        }
-    }
-"""
-
-    injected, err = _append_test_method(content, network_test)
-    if err:
-        print(f"  WARNING: {err}")
-        return False
-
-    write_file(CONTROLLER_TEST, injected)
-    print("  Injected: network instability test (UnknownHostException) into StudentControllerTest.java")
-    print("  Expected error: RuntimeException — Simulated network instability: DNS resolution failed")
-    return True
 
 # ─── E5d: Port Conflict ───────────────────────────────────────────────────────
 
 def inject_port_conflict():
     """
-    Injects a test that binds a port twice to simulate EADDRINUSE.
+    Enables the port conflict test in InfrastructureSimulatorTest.
+    Uses ServerSocket(0) to get a free OS-assigned port, then binds it twice.
     Failure category: Infrastructure
     Expected mechanism response: M10 (fresh container)
     """
-    print("\n[INJECT] Port conflict -> StudentControllerTest.java")
-    if not backup(CONTROLLER_TEST):
-        return False
+    return _inject_simulator("E5D")
 
-    content = read_file(CONTROLLER_TEST)
-
-    port_test = """
-    @Test
-    void simulatePortConflict_shouldFailOnDuplicateBinding() throws Exception {
-        // INJECTED: Simulates port conflict (E5d)
-        // Binds a ServerSocket to a port, then tries to bind again — EADDRINUSE.
-        java.net.ServerSocket firstSocket = null;
-        java.net.ServerSocket secondSocket = null;
-        try {
-            firstSocket = new java.net.ServerSocket(19876);
-            secondSocket = new java.net.ServerSocket(19876);  // duplicate — should throw
-            throw new AssertionError(
-                "Expected BindException but no exception was thrown — port conflict injection failed");
-        } catch (java.io.IOException e) {
-            throw new RuntimeException(
-                "Simulated port conflict: address already in use — " + e.getMessage(), e);
-        } finally {
-            if (firstSocket != null) try { firstSocket.close(); } catch (Exception ignored) {}
-            if (secondSocket != null) try { secondSocket.close(); } catch (Exception ignored) {}
-        }
-    }
-"""
-
-    injected, err = _append_test_method(content, port_test)
-    if err:
-        print(f"  WARNING: {err}")
-        return False
-
-    write_file(CONTROLLER_TEST, injected)
-    print("  Injected: port conflict test (duplicate ServerSocket bind) into StudentControllerTest.java")
-    print("  Expected error: RuntimeException — Simulated port conflict: address already in use")
-    return True
 
 # ─── E5e: Deadlock / Timeout ──────────────────────────────────────────────────
 
 def inject_deadlock():
     """
-    Injects a test that enters an infinite loop, causing the test job
-    to exceed TEST_TIMEOUT_MINUTES and be cancelled by M12.
+    Enables the deadlock test in InfrastructureSimulatorTest.
+    The test spins in an infinite loop; JUnit @Timeout(30s) interrupts it.
     Failure category: Infrastructure
     Expected mechanism response: M12 (timeout cancellation)
     """
-    print("\n[INJECT] Deadlock / timeout -> StudentControllerTest.java")
-    if not backup(CONTROLLER_TEST):
-        return False
+    return _inject_simulator("E5E")
 
-    content = read_file(CONTROLLER_TEST)
-
-    deadlock_test = """
-    @Test
-    @org.junit.jupiter.api.Timeout(value = 30, unit = java.util.concurrent.TimeUnit.SECONDS)
-    void simulateDeadlock_shouldTimeoutAndFail() throws Exception {
-        // INJECTED: Simulates deadlock / infinite-loop timeout (E5e)
-        // Spins indefinitely — JUnit @Timeout or M12 pipeline timeout will interrupt.
-        long start = System.currentTimeMillis();
-        while (true) {
-            if (System.currentTimeMillis() - start > 60_000) {
-                throw new RuntimeException(
-                    "Simulated deadlock: thread did not terminate within expected time");
-            }
-            Thread.sleep(100);
-        }
-    }
-"""
-
-    injected, err = _append_test_method(content, deadlock_test)
-    if err:
-        print(f"  WARNING: {err}")
-        return False
-
-    write_file(CONTROLLER_TEST, injected)
-    print("  Injected: infinite-loop test into StudentControllerTest.java")
-    print("  Expected error: JUnit TimeoutException or M12 pipeline timeout cancellation")
-    return True
 
 # ─── E5f: Disk Exhaustion ────────────────────────────────────────────────────
 
 def inject_disk():
     """
-    Injects a test that writes many small files to simulate disk pressure.
-
-    FIX: The original approach wrote a single 4 GB file. On GitHub Actions
-    (~14 GB free disk) this would hit the 10-minute test timeout before
-    filling the disk, so the observed failure mode was timeout (M12) rather
-    than disk exhaustion (IOException). The new approach writes many 100 MB
-    files in quick succession to fill the disk faster and reliably trigger
-    an IOException before the timeout fires.
+    Enables the disk exhaustion test in InfrastructureSimulatorTest.
+    Queries actual usable /tmp space, writes that amount + 64 MB with sync().
     Failure category: Infrastructure
     Expected mechanism response: M10 (fresh container), M12 (timeout fallback)
     """
-    print("\n[INJECT] Disk exhaustion -> StudentControllerTest.java")
-    if not backup(CONTROLLER_TEST):
-        return False
+    return _inject_simulator("E5F")
 
-    content = read_file(CONTROLLER_TEST)
-
-    disk_test = """
-    @Test
-    void simulateDiskExhaustion_shouldFailWithIOException() throws Exception {
-        // INJECTED: Simulates disk exhaustion (E5f)
-        // Writes 100 MB files in a loop until IOException (no space left on device).
-        // Using many smaller files fills the disk faster than one large file,
-        // ensuring IOException fires before the test timeout.
-        java.util.List<java.io.File> tmpFiles = new java.util.ArrayList<>();
-        long bytesWritten = 0;
-        byte[] chunk = new byte[1024 * 1024]; // 1 MB chunk
-        java.util.Arrays.fill(chunk, (byte) 0xFF);
-        try {
-            while (true) {
-                java.io.File tmpFile = java.io.File.createTempFile("disk_exhaust_", ".tmp");
-                tmpFile.deleteOnExit();
-                tmpFiles.add(tmpFile);
-                try (java.io.FileOutputStream fos = new java.io.FileOutputStream(tmpFile)) {
-                    for (int mb = 0; mb < 100; mb++) {  // 100 MB per file
-                        fos.write(chunk);
-                        bytesWritten += chunk.length;
-                    }
-                    fos.getFD().sync();
-                }
-            }
-        } catch (java.io.IOException e) {
-            throw new RuntimeException(
-                "Simulated disk exhaustion: no space left on device after "
-                + (bytesWritten / (1024 * 1024)) + " MB written — " + e.getMessage(), e);
-        } finally {
-            for (java.io.File f : tmpFiles) { f.delete(); }
-        }
-    }
-"""
-
-    injected, err = _append_test_method(content, disk_test)
-    if err:
-        print(f"  WARNING: {err}")
-        return False
-
-    write_file(CONTROLLER_TEST, injected)
-    print("  Injected: disk exhaustion test (100 MB files loop) into StudentControllerTest.java")
-    print("  Expected error: RuntimeException — Simulated disk exhaustion")
-    return True
 
 # ─── E5g: Corrupted Artifact ──────────────────────────────────────────────────
 
@@ -621,6 +478,8 @@ def inject_artifact():
     """
     Injects a maven-antrun-plugin into pom.xml that deletes target/ during
     the package phase so no JAR is produced.
+    This one stays in pom.xml because it targets the Package stage, not the
+    Test stage, and cannot be expressed as a JUnit test method.
     Failure category: Infrastructure
     Expected mechanism response: M7 (rollback), M10 (fresh container)
     """
@@ -657,7 +516,6 @@ def inject_artifact():
         return False
 
     injected = content.replace(target, corrupt_plugin + target, 1)
-
     if injected == content:
         print("  WARNING: Injection target not found. File may have changed.")
         return False
@@ -667,123 +525,30 @@ def inject_artifact():
     print("  Expected error: 'No JAR artifact found in target/' in pipeline package stage")
     return True
 
+
 # ─── E5h: External Service Unavailable ───────────────────────────────────────
 
 def inject_external():
     """
-    Injects a test that calls an unreachable external HTTP endpoint.
-
-    FIX: The original only caught SocketTimeoutException | ConnectException.
-    On some networks, an unreachable RFC 5737 address (192.0.2.1) returns
-    a NoRouteToHostException, which extends IOException but NOT ConnectException
-    directly, so the original catch block would miss it and propagate an
-    unexpected AssertionError instead of the expected RuntimeException.
-    Fixed to catch IOException as the base class.
+    Enables the external service unavailability test in InfrastructureSimulatorTest.
+    Connects to 192.0.2.1:9999 (RFC 5737 TEST-NET), catches IOException.
     Failure category: Infrastructure
     Expected mechanism response: M1 (retry), M10 (fresh container)
     """
-    print("\n[INJECT] External service unavailable -> StudentControllerTest.java")
-    if not backup(CONTROLLER_TEST):
-        return False
+    return _inject_simulator("E5H")
 
-    content = read_file(CONTROLLER_TEST)
 
-    external_test = """
-    @Test
-    void simulateExternalServiceUnavailable_shouldFailOnTimeout() throws Exception {
-        // INJECTED: Simulates external service unavailability (E5h)
-        // Attempts HTTP GET to an unreachable endpoint (RFC 5737 TEST-NET address).
-        // Catches IOException as base class to handle SocketTimeoutException,
-        // ConnectException, AND NoRouteToHostException across all network environments.
-        try {
-            java.net.URL url = new java.net.URL("http://192.0.2.1:9999/health");
-            java.net.HttpURLConnection conn = (java.net.HttpURLConnection) url.openConnection();
-            conn.setConnectTimeout(3000);  // 3 second timeout
-            conn.setReadTimeout(3000);
-            conn.setRequestMethod("GET");
-            int responseCode = conn.getResponseCode();
-            throw new AssertionError(
-                "Expected connection failure but got response code: " + responseCode);
-        } catch (java.io.IOException e) {
-            throw new RuntimeException(
-                "Simulated external service unavailable: connection failed — " + e.getMessage(), e);
-        }
-    }
-"""
-
-    injected, err = _append_test_method(content, external_test)
-    if err:
-        print(f"  WARNING: {err}")
-        return False
-
-    write_file(CONTROLLER_TEST, injected)
-    print("  Injected: external service unavailability test into StudentControllerTest.java")
-    print("  Expected error: RuntimeException — Simulated external service unavailable")
-    return True
-
-# ─── E5i: Race Condition (Shared Mutable State) ───────────────────────────────
+# ─── E5i: Race Condition ──────────────────────────────────────────────────────
 
 def inject_race():
     """
-    Injects a test that spawns multiple threads concurrently incrementing
-    a shared counter without synchronisation.
+    Enables the race condition test in InfrastructureSimulatorTest.
+    100 threads increment a non-atomic counter; fallback throw guarantees failure.
     Failure category: Infrastructure
-    Expected mechanism response: M4 (retry may or may not help), M5 (flaky detection)
+    Expected mechanism response: M4 (retry), M5 (flaky detection)
     """
-    print("\n[INJECT] Race condition -> StudentControllerTest.java")
-    if not backup(CONTROLLER_TEST):
-        return False
+    return _inject_simulator("E5I")
 
-    content = read_file(CONTROLLER_TEST)
-
-    race_test = """
-    @Test
-    void simulateRaceCondition_shouldFailDueToUnsynchronisedAccess() throws Exception {
-        // INJECTED: Simulates race condition on shared mutable state (E5i)
-        // 100 threads each increment a non-atomic counter 1000 times.
-        // Expected value: 100_000. Actual value will almost certainly differ.
-        final int[] counter = {0};  // non-atomic, deliberately unsynchronised
-        int threadCount = 100;
-        int incrementsPerThread = 1000;
-
-        java.util.concurrent.CountDownLatch latch = new java.util.concurrent.CountDownLatch(threadCount);
-        java.util.concurrent.ExecutorService pool =
-            java.util.concurrent.Executors.newFixedThreadPool(threadCount);
-
-        for (int i = 0; i < threadCount; i++) {
-            pool.submit(() -> {
-                for (int j = 0; j < incrementsPerThread; j++) {
-                    counter[0]++;  // intentionally unsafe
-                }
-                latch.countDown();
-            });
-        }
-        latch.await(30, java.util.concurrent.TimeUnit.SECONDS);
-        pool.shutdown();
-
-        int expected = threadCount * incrementsPerThread;
-        if (counter[0] != expected) {
-            throw new RuntimeException(
-                "Simulated race condition: expected counter=" + expected
-                + " but got counter=" + counter[0]
-                + " — unsynchronised concurrent access caused data corruption");
-        }
-        // If by chance the count is exact (extremely unlikely), force failure anyway
-        throw new RuntimeException(
-            "Simulated race condition: counter reached exact value " + counter[0]
-            + " — injection did not produce expected race; re-run to observe non-determinism");
-    }
-"""
-
-    injected, err = _append_test_method(content, race_test)
-    if err:
-        print(f"  WARNING: {err}")
-        return False
-
-    write_file(CONTROLLER_TEST, injected)
-    print("  Injected: race condition test (unsynchronised counter) into StudentControllerTest.java")
-    print("  Expected error: RuntimeException — Simulated race condition")
-    return True
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # MULTI-CAUSE PAIRS (E6, E7, E9–E12)
@@ -890,7 +655,7 @@ def inject_all():
 def restore_all():
     """Restores all injected files to their original state from backups."""
     print("\n[RESTORE] Restoring all files to original state...")
-    files = [CONTROLLER, CONTROLLER_TEST, SERVICE_TEST, APP_PROPS, POM_XML, JVM_CONFIG]
+    files = [CONTROLLER, CONTROLLER_TEST, SERVICE_TEST, INFRA_SIMULATOR, APP_PROPS, POM_XML, JVM_CONFIG]
     for f in files:
         restore(f)
     print("\nAll files restored. Pipeline is back to clean baseline.")
