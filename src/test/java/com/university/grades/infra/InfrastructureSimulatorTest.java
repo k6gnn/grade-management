@@ -45,7 +45,7 @@ class InfrastructureSimulatorTest {
     // ── SINGLE INJECTION POINT ────────────────────────────────────────────────
     // inject_failure.py replaces the value of this constant. Do not rename it
     // or change its formatting — the injector matches the exact string below.
-    static final String ACTIVE_EXPERIMENT = "E5I";
+    static final String ACTIVE_EXPERIMENT = "NONE";
     // ─────────────────────────────────────────────────────────────────────────
 
     // ── E5B: OOM / Memory Exhaustion ─────────────────────────────────────────
