@@ -162,9 +162,14 @@ def extract_features(row: dict) -> list[float]:
     c = clean(text)
 
     # ── Test counts ───────────────────────────────────────────────────────────
-    maven_runs  = sum(int(x) for x in re.findall(r"tests run: (\d+)", c, re.I))
-    maven_fail  = sum(int(x) for x in re.findall(r"failures: (\d+)", c, re.I))
-    maven_skip  = sum(int(x) for x in re.findall(r"skipped: (\d+)", c, re.I))
+    maven_runs   = sum(int(x) for x in re.findall(r"tests run: (\d+)", c, re.I))
+    maven_fail   = sum(int(x) for x in re.findall(r"failures: (\d+)", c, re.I))
+    # FIX RC2: Surefire records OOM/RuntimeException as 'Errors', not 'Failures'.
+    # Treat errors as failures so feat_tests_failed and fail_ratio are non-zero
+    # when the only signal is "Errors: 1" (as happens for E5B OOM).
+    maven_errors = sum(int(x) for x in re.findall(r"errors: (\d+)", c, re.I))
+    maven_fail   = maven_fail + maven_errors
+    maven_skip   = sum(int(x) for x in re.findall(r"skipped: (\d+)", c, re.I))
     pytest_fail = sum(int(x) for x in re.findall(r"(\d+) failed", c, re.I))
     pytest_pass = sum(int(x) for x in re.findall(r"(\d+) passed", c, re.I))
     pytest_skip = sum(int(x) for x in re.findall(r"(\d+) skipped", c, re.I))
@@ -786,6 +791,33 @@ def main() -> None:
     # Requiring text signals caused false negatives on Jenkins when
     # config_validation.log was absent from the collected logs directory.
     feat_map = dict(zip(FEATURE_NAMES, feats))
+
+    # ── OOM / infra-runner guardrail ──────────────────────────────────────────
+    # FIX RC3/RC4: When the ML model sees tests_ran=1 + error_in_test_step=1 it
+    # classifies as test_failure even if kw_infra_runner is set, because it was
+    # trained on OOM patterns where the runner dies before any test runs (tests_ran=0).
+    # E5B catches OutOfMemoryError inside the JVM so the runner survives —
+    # an out-of-distribution pattern the model has never seen.
+    #
+    # Guardrail: if kw_infra_runner fired AND there are no assertion-style signals,
+    # force classification to infrastructure regardless of model output.
+    _infra_kw  = feat_map.get("feat_kw_infra_runner", 0)
+    _assert_kw = feat_map.get("feat_kw_test_assert", 0)
+    if (
+        _infra_kw > 0
+        and _assert_kw == 0          # no assertion failure evidence
+        and classification in ("test_failure", "flaky_test", "unknown")
+    ):
+        log.info(
+            "  OOM/infra guardrail: kw_infra_runner=1, kw_test_assert=0 "
+            "-> overriding '%s' to 'infrastructure'", classification
+        )
+        classification = "infrastructure"
+        confidence     = max(confidence, 0.72)
+        probabilities["infrastructure"] = confidence
+        guardrail_applied = True
+        model_used = model_used + "+oom_infra_guard"
+
     # Use None as default so absent keys (stages that never ran) are treated as
     # skipped, not "success".  Your pipeline_status.json won't contain test_status
     # or package_status when M8 fails because those stages never executed.
@@ -873,7 +905,7 @@ def _heuristic_classification(feats: list[float]) -> str:
     )
     infra_score = (
         f("feat_kw_infra_network") * 3
-        + f("feat_kw_infra_runner") * 3
+        + f("feat_kw_infra_runner") * 5  # FIX RC4: raised from 3 → 5 so OOM beats error_in_test_step
     )
     config_score = (
         f("feat_kw_config_fail") * 2

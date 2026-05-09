@@ -377,8 +377,17 @@ jobs:
               TIMESTAMP=$(date -u +%H:%M:%S)
               echo "ATTEMPT_FAILED at $TIMESTAMP (exit_code=$EXIT_CODE)" >> flaky_failure_log.txt
               if [ -d "target/surefire-reports" ]; then
-                grep -h "FAILED\|ERROR\|RuntimeException\|Simulated transient\|timed out\|instability\|ApplicationContext\|BeanCreationException\|INVALID_PORT_VALUE\|NumberFormatException" \
+                # FIX RC1: grep for infra-class keywords in addition to test failure keywords.
+                # OutOfMemoryError is reported in Surefire TXT under "Errors:" (not "Failures:"),
+                # so it never appeared in test.log. By mirroring these lines here, M13's
+                # kw_infra_runner regex fires on test.log even when the Surefire artifact
+                # download fails in the M13 job.
+                grep -h "FAILED\|ERROR\|RuntimeException\|Simulated transient\|timed out\|instability\|ApplicationContext\|BeanCreationException\|INVALID_PORT_VALUE\|NumberFormatException\|OutOfMemoryError\|java\.lang\.OutOfMemoryError\|oomkilled\|signal: killed\|process completed with exit code 137\|worker process exited with code\|javascript heap out of memory\|fatal error: runtime: out of memory" \
                   target/surefire-reports/*.txt 2>/dev/null >> flaky_failure_log.txt || true
+                # Mirror infra-class lines into test.log so M13 kw_infra_runner fires
+                # on test.log even when the Surefire artifact download later fails.
+                grep -h "OutOfMemoryError\|java\.lang\.OutOfMemoryError\|oomkilled\|signal: killed\|process completed with exit code 137\|worker process exited with code\|javascript heap out of memory\|fatal error: runtime: out of memory\|Simulated infrastructure failure" \
+                  target/surefire-reports/*.txt 2>/dev/null >> test.log || true
               fi
             fi
             exit $EXIT_CODE
