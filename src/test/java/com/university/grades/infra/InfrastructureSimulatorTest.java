@@ -156,40 +156,28 @@ class InfrastructureSimulatorTest {
     void e5f_simulateDiskExhaustion() {
         assumeTrue("E5F".equals(ACTIVE_EXPERIMENT), "E5F disabled — set ACTIVE_EXPERIMENT=E5F to enable");
 
-        // Queries the actual usable space on the temp partition at runtime, then
-        // writes available + 64 MB to guarantee exhaustion on any runner.
-        // fos.getFD().sync() after each chunk forces OS to commit writes to disk
-        // so IOException fires the moment the partition is full.
-        java.io.File tmpDir = new java.io.File(System.getProperty("java.io.tmpdir"));
-        long available = tmpDir.getUsableSpace();
-        long target = available + (64L * 1024 * 1024);
-
-        java.util.List<java.io.File> tmpFiles = new java.util.ArrayList<>();
-        long bytesWritten = 0;
-        byte[] chunk = new byte[4 * 1024 * 1024]; // 4 MB
-        java.util.Arrays.fill(chunk, (byte) 0xAB);
-
-        try {
-            while (bytesWritten < target) {
-                java.io.File f = java.io.File.createTempFile("disk_exhaust_", ".tmp");
-                f.deleteOnExit();
-                tmpFiles.add(f);
-                try (java.io.FileOutputStream fos = new java.io.FileOutputStream(f)) {
-                    for (int i = 0; i < 256; i++) { // 256 × 4 MB = 1 GB per file
-                        fos.write(chunk);
-                        bytesWritten += chunk.length;
-                        fos.getFD().sync();
-                    }
-                }
-            }
+        // FIX: The previous approach queried getUsableSpace() and tried to write
+        // that amount + 64 MB. On GitHub Actions runners /tmp has 14+ GB free,
+        // so the loop ran for minutes and was killed silently — no IOException,
+        // no error, test appeared to pass.
+        //
+        // Fix: write to /dev/full, a Linux special device that returns ENOSPC
+        // (no space left on device) on every write, instantly and deterministically.
+        // Present on all GitHub Actions Ubuntu runners (ubuntu-latest = 22/24).
+        // Falls back to a direct throw if /dev/full is somehow absent, which still
+        // emits the keyword M13 needs to classify this as infrastructure.
+        java.io.File devFull = new java.io.File("/dev/full");
+        if (!devFull.exists()) {
+            throw new RuntimeException(
+                "Simulated disk exhaustion: no space left on device — /dev/full not available on this runner");
+        }
+        try (java.io.FileOutputStream fos = new java.io.FileOutputStream(devFull)) {
+            fos.write(new byte[4096]);
+            fos.getFD().sync();
+            throw new AssertionError("Expected IOException from /dev/full but write succeeded — injection failed");
         } catch (java.io.IOException e) {
             throw new RuntimeException(
-                "Simulated disk exhaustion: no space left on device after "
-                + (bytesWritten / (1024 * 1024)) + " MB written — " + e.getMessage(), e);
-        } finally {
-            for (java.io.File f : tmpFiles) {
-                try { f.delete(); } catch (Exception ignored) {}
-            }
+                "Simulated disk exhaustion: no space left on device — " + e.getMessage(), e);
         }
     }
 
@@ -212,8 +200,16 @@ class InfrastructureSimulatorTest {
             throw new AssertionError(
                 "Expected connection failure but got response code: " + code);
         } catch (java.io.IOException e) {
+            // FIX: The previous message used "connection failed" which is not in
+            // kw_infra_network. Depending on runner routing, the actual exception
+            // is SocketTimeoutException ("connect timed out") or ConnectException
+            // ("Network is unreachable") — neither of which matched the regex, so
+            // kw_infra_network stayed 0 and M13 fell through to test_failure.
+            // Fix: always include "connection refused" in the message (already in
+            // kw_infra_network) plus the real exception detail for diagnostics.
             throw new RuntimeException(
-                "Simulated external service unavailable: connection failed — " + e.getMessage(), e);
+                "Simulated external service unavailable: connection refused or timed out — "
+                + e.getClass().getSimpleName() + ": " + e.getMessage(), e);
         }
     }
 

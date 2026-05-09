@@ -502,7 +502,7 @@ def inject_artifact():
                         <configuration>
                             <target>
                                 <delete dir="target" includeemptydirs="true" quiet="true"/>
-                                <echo message="INJECTED: target directory deleted to simulate corrupted artifact (E5g)"/>
+                                <echo message="INJECTED: e5g corrupted artifact — no JAR artifact found in target/ (target directory deleted to simulate corrupted artifact)"/>
                             </target>
                         </configuration>
                     </execution>

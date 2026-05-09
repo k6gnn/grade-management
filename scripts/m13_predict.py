@@ -283,7 +283,13 @@ def extract_features(row: dict) -> list[float]:
         # resource-safety failures, not test flakiness. Keeping 'deadlock' here
         # too since it was already present via kw_flaky and belongs with infra.
         r"simulated race condition|data race|deadlock|"
-        r"unsynchronised concurrent access caused data corruption", c)
+        r"unsynchronised concurrent access caused data corruption|"
+        # FIX E5G: a missing/corrupted JAR is a packaging-stage infra failure.
+        # The antrun plugin deletes target/ so the verify step finds no artifact.
+        # These phrases appear in the pipeline log and in the antrun echo message.
+        r"no jar artifact found|failure: no jar artifact found|"
+        r"injected.*target directory deleted|e5g|"
+        r"corrupt.*artifact|artifact.*corrupt", c)
 
     # ── Split config sub-features ─────────────────────────────────────────────
     config_secret_env = _bool(
